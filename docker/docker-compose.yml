@@ -1,0 +1,73 @@
+version: "3.9"
+
+# ── Development / staging stack ───────────────────────────────────────────────
+# For production: use managed PostgreSQL (RDS, Cloud SQL, Supabase) and
+# deploy visitorpass-api as a container to your compute provider.
+
+services:
+  # ── Reverse proxy ────────────────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── API (Rust/Axum) ───────────────────────────────────────────────────────
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      DATABASE_URL:              "postgres://visitorpass:${DB_PASSWORD}@postgres:5432/visitorpass"
+      MASTER_KEY_HEX:            "${MASTER_KEY_HEX}"   # 64-char hex; from secrets manager
+      BASE_URL:                  "${BASE_URL:-http://localhost}"
+      HOST:                      "0.0.0.0"
+      PORT:                      "8080"
+      ENV:                       "${APP_ENV:-production}"
+      DATABASE_MAX_CONNECTIONS:  "20"
+      DATABASE_MIN_CONNECTIONS:  "5"
+      RUST_LOG:                  "visitorpass=info,tower_http=info"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout:  5s
+      retries:  3
+      start_period: 30s
+    restart: unless-stopped
+    # No exposed ports — all traffic goes through Caddy
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB:       visitorpass
+      POSTGRES_USER:     visitorpass
+      POSTGRES_PASSWORD: "${DB_PASSWORD}"
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U visitorpass -d visitorpass"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+    restart: unless-stopped
+    # Expose only on localhost for psql access; never expose to internet
+    ports:
+      - "127.0.0.1:5432:5432"
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

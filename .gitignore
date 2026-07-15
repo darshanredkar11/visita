@@ -1,0 +1,25 @@
+# Binaries and build artifacts
+/target/
+**/target/
+
+# Environment — NEVER commit
+.env
+.env.local
+.env.production
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# macOS
+.DS_Store
+
+# SQLx query cache (can be committed to enable offline mode in CI)
+# .sqlx/
+
+# Logs
+*.log
+
+# Test artifacts
+/test_output/

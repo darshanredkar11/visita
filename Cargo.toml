@@ -1,0 +1,99 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain",
+    "crates/application",
+    "crates/infrastructure",
+    "crates/api",
+]
+
+[workspace.package]
+version    = "1.0.0"
+edition    = "2021"
+authors    = ["VisitorPass Engineering"]
+license    = "UNLICENSED"
+repository = "https://github.com/visitorpass/visitorpass"
+
+# ── Shared dependency versions ────────────────────────────────────────────────
+# Pin versions here; individual crates inherit with `workspace = true`.
+[workspace.dependencies]
+
+# Async runtime
+tokio        = { version = "1",    features = ["full"] }
+
+# Web framework
+axum         = { version = "0.7",  features = ["macros", "ws"] }
+tower        = { version = "0.4",  features = ["util"] }
+tower-http   = { version = "0.5",  features = [
+    "cors", "compression-gzip", "request-id", "timeout", "trace", "limit"
+] }
+
+# Database
+sqlx = { version = "0.7", features = [
+    "runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "migrate"
+] }
+
+# Serialization
+serde        = { version = "1",    features = ["derive"] }
+serde_json   = { version = "1" }
+ciborium     = { version = "0.2" }   # CBOR for QR payloads
+
+# Cryptography
+ed25519-dalek    = { version = "2",    features = ["rand_core", "serde"] }
+chacha20poly1305 = { version = "0.10" }
+argon2           = { version = "0.5" }
+sha2             = { version = "0.10" }
+hmac             = { version = "0.12" }
+hkdf             = { version = "0.12" }
+rand             = { version = "0.8" }
+rand_core        = { version = "0.6",  features = ["getrandom"] }
+
+# PASETO v4
+pasetors = { version = "0.6", features = ["v4", "std"] }
+
+# Identifiers
+uuid  = { version = "1", features = ["v4", "v7", "serde"] }
+ulid  = { version = "1" }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Encoding
+base64   = { version = "0.22" }
+hex      = { version = "0.4" }
+
+# Error handling
+thiserror = { version = "1" }
+anyhow    = { version = "1" }
+
+# Validation
+validator = { version = "0.18", features = ["derive"] }
+
+# Tracing / structured logging
+tracing            = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Config
+config = { version = "0.14" }
+
+# OpenAPI docs (api crate only)
+utoipa            = { version = "4", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "6", features = ["axum"] }
+
+# Misc
+once_cell  = { version = "1" }
+bytes      = { version = "1" }
+async-trait = { version = "0.1" }
+jsonwebtoken = { version = "9.3" }
+reqwest      = { version = "0.12", features = ["json"] }
+futures-util = { version = "0.3" }
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+
+[profile.dev]
+opt-level = 0
+debug     = true

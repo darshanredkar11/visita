@@ -1,0 +1,65 @@
+# VisitorPass Caddyfile
+# Replace {$DOMAIN} with your actual domain, e.g. api.visitorpass.app
+
+{
+    # Global options
+    email    {$ACME_EMAIL}       # Let's Encrypt registration email
+    # Uncomment to use staging CA during testing:
+    # acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$DOMAIN} {
+    # ── Security headers ──────────────────────────────────────────────────
+    header {
+        Strict-Transport-Security  "max-age=63072000; includeSubDomains; preload"
+        X-Content-Type-Options     "nosniff"
+        X-Frame-Options            "DENY"
+        X-XSS-Protection           "1; mode=block"
+        Referrer-Policy            "strict-origin-when-cross-origin"
+        Permissions-Policy         "camera=(), microphone=(), geolocation=()"
+        # Remove server version info
+        -Server
+    }
+
+    # ── API routes ────────────────────────────────────────────────────────
+    handle /api/* {
+        # Rate limit: 120 req/min per IP
+        rate_limit {remote.ip} 120r/m
+
+        reverse_proxy api:8080 {
+            # Health-check the upstream
+            health_uri    /health
+            health_interval 15s
+
+            header_up X-Real-IP {remote.ip}
+            header_up X-Forwarded-For {remote.ip}
+        }
+    }
+
+    # ── Visitor pass share page ───────────────────────────────────────────
+    handle /v/* {
+        reverse_proxy api:8080 {
+            header_up X-Real-IP {remote.ip}
+        }
+    }
+
+    # ── Health check (unauthenticated, no rate limit) ─────────────────────
+    handle /health {
+        reverse_proxy api:8080
+    }
+
+    # ── Reject everything else ────────────────────────────────────────────
+    handle {
+        respond 404
+    }
+
+    # ── Access log ────────────────────────────────────────────────────────
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size    100mb
+            roll_keep    10
+            roll_keep_for 720h
+        }
+        format json
+    }
+}

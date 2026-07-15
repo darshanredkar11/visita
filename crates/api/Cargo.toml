@@ -1,0 +1,57 @@
+[package]
+name        = "visitorpass-api"
+description = "Axum HTTP API server for VisitorPass."
+version.workspace  = true
+edition.workspace  = true
+authors.workspace  = true
+license.workspace  = true
+
+[dependencies]
+visitorpass-domain         = { path = "../domain" }
+visitorpass-application    = { path = "../application" }
+visitorpass-infrastructure = { path = "../infrastructure" }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Web framework
+axum       = { workspace = true }
+tower      = { workspace = true }
+tower-http = { workspace = true }
+
+# Database / migrations
+sqlx = { workspace = true }
+
+# Serialization
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+# PASETO
+pasetors = { workspace = true }
+
+# Cryptography
+ed25519-dalek = { workspace = true }
+sha2          = { workspace = true }
+
+# IDs
+uuid   = { workspace = true }
+chrono = { workspace = true }
+
+# Validation
+validator = { workspace = true }
+
+# Logging / instrumentation
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Config
+config = { workspace = true }
+
+# Misc
+once_cell = { workspace = true }
+bytes     = { workspace = true }
+hex       = { workspace = true }
+base64    = { workspace = true }
+jsonwebtoken = { workspace = true }
+reqwest      = { workspace = true }
+futures-util = { workspace = true }

@@ -1,0 +1,78 @@
+-- SQLite Schema for SQLDelight Offline Storage
+
+CREATE TABLE session (
+    key INTEGER PRIMARY KEY CHECK (key = 0), -- single-row constraint
+    token TEXT NOT NULL,
+    role TEXT NOT NULL,
+    org_id TEXT NOT NULL,
+    unit_identifier TEXT NOT NULL,
+    user_name TEXT NOT NULL
+);
+
+CREATE TABLE visitor_pass (
+    id TEXT NOT NULL PRIMARY KEY,
+    pass_number TEXT NOT NULL,
+    visitor_name TEXT NOT NULL,
+    visitor_phone_enc BLOB,
+    valid_from TEXT NOT NULL,
+    valid_until TEXT NOT NULL,
+    status TEXT NOT NULL,
+    qr_payload TEXT NOT NULL
+);
+
+CREATE TABLE entry_log (
+    id TEXT NOT NULL PRIMARY KEY,
+    pass_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    synced INTEGER NOT NULL DEFAULT 0, -- 0 = false, 1 = true
+    denial_reason TEXT,
+    guard_note TEXT
+);
+
+CREATE TABLE ad_hoc_approval (
+    id TEXT NOT NULL PRIMARY KEY,
+    visitor_name TEXT NOT NULL,
+    visitor_phone TEXT NOT NULL,
+    unit_identifier TEXT NOT NULL,
+    status TEXT NOT NULL, -- 'PENDING', 'APPROVED', 'DENIED'
+    created_at TEXT NOT NULL
+);
+
+-- Queries
+insertSession:
+INSERT OR REPLACE INTO session (key, token, role, org_id, unit_identifier, user_name)
+VALUES (0, ?, ?, ?, ?, ?);
+
+getSession:
+SELECT * FROM session WHERE key = 0 LIMIT 1;
+
+clearSession:
+DELETE FROM session;
+
+insertPass:
+INSERT OR REPLACE INTO visitor_pass (id, pass_number, visitor_name, visitor_phone_enc, valid_from, valid_until, status, qr_payload)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+listPasses:
+SELECT * FROM visitor_pass ORDER BY valid_from DESC;
+
+insertEntryLog:
+INSERT INTO entry_log (id, pass_id, action, occurred_at, synced, denial_reason, guard_note)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+getUnsyncedEntryLogs:
+SELECT * FROM entry_log WHERE synced = 0;
+
+markEntryLogSynced:
+UPDATE entry_log SET synced = 1 WHERE id = ?;
+
+insertAdHocApproval:
+INSERT OR REPLACE INTO ad_hoc_approval (id, visitor_name, visitor_phone, unit_identifier, status, created_at)
+VALUES (?, ?, ?, ?, ?, ?);
+
+updateAdHocStatus:
+UPDATE ad_hoc_approval SET status = ? WHERE id = ?;
+
+getPendingAdHocApprovals:
+SELECT * FROM ad_hoc_approval WHERE status = 'PENDING' ORDER BY created_at DESC;

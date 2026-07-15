@@ -1,0 +1,16 @@
+[package]
+name        = "visitorpass-domain"
+description = "Domain entities, value objects, and errors. Zero external dependencies."
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+
+[dependencies]
+# No framework or database dependencies allowed in this crate.
+# Only the Rust standard library and these minimal, stable crates.
+uuid      = { workspace = true }
+chrono    = { workspace = true }
+thiserror = { workspace = true }
+serde     = { workspace = true }
+rand      = { version = "0.8", features = ["getrandom"] }  # CSPRNG for pass number generation
