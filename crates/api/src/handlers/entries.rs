@@ -1,7 +1,7 @@
 use axum::{extract::State, response::IntoResponse, Extension, Json};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use visitorpass_domain::{entities::EntryLog, value_objects::OrgContext};
+use visitorpass_domain::{entities::{DenialReason, EntryLog}, value_objects::OrgContext};
 use visitorpass_application::ports::repositories::{EntryFilter, PageParams};
 
 use crate::{errors::ApiError, state::AppState};
@@ -25,7 +25,7 @@ pub struct EntryLogResponse {
     pub device_id:          Option<Uuid>,
     pub guard_user_id:      Option<Uuid>,
     pub action:             String,
-    pub denial_reason:      Option<String>,
+    pub denial_reason:      Option<DenialReason>,
     pub guard_note:         Option<String>,
     pub occurred_at:        chrono::DateTime<chrono::Utc>,
     pub server_received_at: chrono::DateTime<chrono::Utc>,

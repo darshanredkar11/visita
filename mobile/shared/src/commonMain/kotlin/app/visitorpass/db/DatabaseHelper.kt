@@ -10,6 +10,7 @@ class DatabaseHelper(val driver: SqlDriver) {
     fun clearAllData() {
         database.transaction {
             queries.clearSession()
+            queries.upsertSyncCheckpoint(0)
         }
     }
 }

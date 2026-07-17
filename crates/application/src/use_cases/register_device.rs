@@ -20,6 +20,7 @@ pub struct RegisterDeviceInput {
     pub platform:      Option<String>,
     pub os_version:    Option<String>,
     pub app_version:   Option<String>,
+    pub push_token:    Option<String>,
 }
 
 pub struct RegisterDeviceUseCase {
@@ -42,8 +43,8 @@ impl RegisterDeviceUseCase {
         ctx: &OrgContext,
         input: RegisterDeviceInput,
     ) -> Result<Device, DomainError> {
-        // Enforce role authorization: Admins or Owners can register devices
-        ctx.require_role(visitorpass_domain::value_objects::Role::Admin)?;
+        // Enforce role authorization: OrgAdmins can register devices
+        ctx.require_role(visitorpass_domain::value_objects::Role::OrgAdmin)?;
 
         // Validate public key length (Ed25519 requires 32 bytes)
         if input.public_key.len() != 32 {
@@ -85,7 +86,7 @@ impl RegisterDeviceUseCase {
             platform:      input.platform,
             os_version:    input.os_version,
             app_version:   input.app_version,
-            push_token:    None,
+            push_token:    input.push_token,
         };
 
         let device = self.devices.create(ctx, db_input).await?;

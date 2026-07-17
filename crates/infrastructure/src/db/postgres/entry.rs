@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 use visitorpass_domain::{
-    entities::{EntryAction, EntryLog},
+    entities::{DenialReason, EntryAction, EntryLog},
     value_objects::OrgContext,
     DomainError,
 };
@@ -30,17 +30,28 @@ impl EntryRepository for PgEntryRepository {
     ) -> Result<Option<EntryLog>, DomainError> {
         let entry_id = Uuid::now_v7();
 
-        // Use the global unique index idx_entry_logs_idempotency: (org_id, client_event_id)
-        // INSERT ... ON CONFLICT DO NOTHING.
+        // Use the global unique index idx_entry_logs_idempotency: (org_id, client_event_id, created_at).
+        // created_at must be part of the ON CONFLICT target because Postgres requires
+        // partitioned-table unique indexes to include the partition key; see
+        // migrations/20240101000010_entry_logs.sql for the rationale.
+        //
+        // created_at is set to `occurred_at` (client-supplied, stable across retries)
+        // rather than NOW(): if it used NOW(), a retried insert (same client_event_id,
+        // e.g. after a network drop before the ack) would get a *different* created_at
+        // on each attempt, so it would never collide with the first row's unique index
+        // entry and ON CONFLICT DO NOTHING would never fire, silently defeating dedup.
+        // server_received_at (below) already captures true server wall-clock ingestion
+        // time, so created_at is free to serve double duty as the partition/dedup key.
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         let result = sqlx::query(
             r#"
             INSERT INTO app.entry_logs (
                 id, org_id, location_id, pass_id, device_id, guard_user_id, action, denial_reason, guard_note, occurred_at, server_received_at, client_event_id, created_at
             )
             VALUES (
-                $1, $2, $3, $4, $5, $6, $7::app.entry_action, $8, $9, $10, NOW(), $11, NOW()
+                $1, $2, $3, $4, $5, $6, $7::app.entry_action, $8::app.denial_reason, $9, $10, NOW(), $11, $10
             )
-            ON CONFLICT (org_id, client_event_id) DO NOTHING
+            ON CONFLICT (org_id, client_event_id, created_at) DO NOTHING
             "#,
         )
         .bind(entry_id)
@@ -50,11 +61,11 @@ impl EntryRepository for PgEntryRepository {
         .bind(input.device_id)
         .bind(input.guard_user_id)
         .bind(&input.action)
-        .bind(&input.denial_reason)
+        .bind(input.denial_reason.as_ref().map(|d| d.as_str()))
         .bind(&input.guard_note)
         .bind(input.occurred_at)
         .bind(input.client_event_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Create entry log DB error");
@@ -63,27 +74,31 @@ impl EntryRepository for PgEntryRepository {
 
         if result.rows_affected() == 0 {
             // Already synced, idempotent ignore
+            tx.commit().await.map_err(|_| DomainError::CryptoError)?;
             return Ok(None);
         }
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         let entry = self.find_by_id(ctx, entry_id).await?;
         Ok(Some(entry))
     }
 
     async fn find_by_id(&self, ctx: &OrgContext, id: Uuid) -> Result<EntryLog, DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         let row = sqlx::query(
             r#"
-            SELECT id, org_id, location_id, pass_id, device_id, guard_user_id, action::text, denial_reason, guard_note, occurred_at, server_received_at, client_event_id, created_at
+            SELECT id, org_id, location_id, pass_id, device_id, guard_user_id, action::text, denial_reason::text, guard_note, occurred_at, server_received_at, client_event_id, created_at
             FROM app.entry_logs
             WHERE id = $1 AND org_id = $2
             "#,
         )
         .bind(id)
         .bind(ctx.org_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?
         .ok_or(DomainError::EntryNotFound(id))?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         let action_str: String = row.get("action");
         let action = match action_str.as_str() {
@@ -91,6 +106,8 @@ impl EntryRepository for PgEntryRepository {
             "DENIED" => EntryAction::Denied,
             _ => EntryAction::Entry,
         };
+        let denial_reason_str: Option<String> = row.get("denial_reason");
+        let denial_reason = denial_reason_str.as_deref().map(DenialReason::try_from).transpose()?;
 
         Ok(EntryLog {
             id: row.get("id"),
@@ -100,7 +117,7 @@ impl EntryRepository for PgEntryRepository {
             device_id: row.get("device_id"),
             guard_user_id: row.get("guard_user_id"),
             action,
-            denial_reason: row.get("denial_reason"),
+            denial_reason,
             guard_note: row.get("guard_note"),
             occurred_at: row.get("occurred_at"),
             server_received_at: row.get("server_received_at"),
@@ -115,9 +132,10 @@ impl EntryRepository for PgEntryRepository {
         filter: EntryFilter,
         page: PageParams,
     ) -> Result<Page<EntryLog>, DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         let mut query = String::from(
             r#"
-            SELECT id, org_id, location_id, pass_id, device_id, guard_user_id, action::text, denial_reason, guard_note, occurred_at, server_received_at, client_event_id, created_at
+            SELECT id, org_id, location_id, pass_id, device_id, guard_user_id, action::text, denial_reason::text, guard_note, occurred_at, server_received_at, client_event_id, created_at
             FROM app.entry_logs
             WHERE org_id = $1
             "#,
@@ -188,10 +206,11 @@ impl EntryRepository for PgEntryRepository {
         }
         q = q.bind(page.limit + 1);
 
-        let rows = q.fetch_all(&self.pool).await.map_err(|e| {
+        let rows = q.fetch_all(&mut *tx).await.map_err(|e| {
             tracing::error!(error = %e, "List entries DB error");
             DomainError::CryptoError
         })?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         let mut items = Vec::new();
         for row in rows {
@@ -201,6 +220,8 @@ impl EntryRepository for PgEntryRepository {
                 "DENIED" => EntryAction::Denied,
                 _ => EntryAction::Entry,
             };
+            let denial_reason_str: Option<String> = row.get("denial_reason");
+            let denial_reason = denial_reason_str.as_deref().map(DenialReason::try_from).transpose()?;
             items.push(EntryLog {
                 id: row.get("id"),
                 org_id: row.get("org_id"),
@@ -209,7 +230,7 @@ impl EntryRepository for PgEntryRepository {
                 device_id: row.get("device_id"),
                 guard_user_id: row.get("guard_user_id"),
                 action,
-                denial_reason: row.get("denial_reason"),
+                denial_reason,
                 guard_note: row.get("guard_note"),
                 occurred_at: row.get("occurred_at"),
                 server_received_at: row.get("server_received_at"),

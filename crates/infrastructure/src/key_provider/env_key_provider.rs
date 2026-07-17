@@ -72,11 +72,24 @@ impl KeyProvider for EnvKeyProvider {
     }
 
     fn derive_paseto_key(&self) -> Result<[u8; 64], DomainError> {
-        // PASETO v4 uses Ed25519 which needs a 64-byte seed
-        // (32-byte private key scalar + 32-byte public key)
-        let mut key = [0u8; 64];
-        self.hkdf_derive(b"paseto-server-key", b"vp-token-v1", &mut key)?;
-        Ok(key)
+        // PASETO v4.public (pasetors::keys::AsymmetricSecretKey<V4>) requires the
+        // 64-byte "expanded" Ed25519 secret key format: 32-byte seed || 32-byte
+        // public key, where the public key MUST be the one mathematically derived
+        // from that seed (RFC 8032 scalar multiplication) -- it is NOT valid to fill
+        // both halves with independent HKDF output, because signing uses the seed
+        // while verification (crates/api/src/middleware/auth.rs) treats bytes
+        // [32..64] as the actual Ed25519 public key. Two unrelated random halves
+        // would make every issued token fail verification.
+        let mut seed = [0u8; 32];
+        self.hkdf_derive(b"paseto-server-key", b"vp-token-v1", &mut seed)?;
+
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let public_key = signing_key.verifying_key().to_bytes();
+
+        let mut expanded = [0u8; 64];
+        expanded[..32].copy_from_slice(&seed);
+        expanded[32..].copy_from_slice(&public_key);
+        Ok(expanded)
     }
 
     fn derive_phone_hmac_key(&self) -> Result<[u8; 32], DomainError> {

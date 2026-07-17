@@ -32,6 +32,7 @@ pasetors = { workspace = true }
 # Cryptography
 ed25519-dalek = { workspace = true }
 sha2          = { workspace = true }
+rand          = { workspace = true }
 
 # IDs
 uuid   = { workspace = true }
@@ -55,3 +56,9 @@ base64    = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest      = { workspace = true }
 futures-util = { workspace = true }
+async-trait  = { workspace = true }
+
+[dev-dependencies]
+# Test-only: lock-guard mocks in tests.rs (e.g. CapturingNotifier) that
+# immediately unwrap -- parking_lot avoids the poisoning-error boilerplate.
+parking_lot = { workspace = true }

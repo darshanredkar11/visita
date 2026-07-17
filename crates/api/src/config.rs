@@ -17,6 +17,12 @@ pub struct AppConfig {
     pub env: String,
 
     // ── Database ──────────────────────────────────────────────────────────
+    /// Runtime connection string. Migration 024 added a least-privilege
+    /// `visitorpass_app` role specifically so RLS (migration 023) has any
+    /// real effect -- superusers (which `visitorpass`, the migration/owner
+    /// role, is) bypass row-level security unconditionally, with no
+    /// override. This MUST point at `visitorpass_app` (or an equivalent
+    /// non-superuser, non-BYPASSRLS role) for RLS to actually do anything.
     pub database_url: String,
 
     #[serde(default = "defaults::db_max_connections")]
@@ -24,6 +30,15 @@ pub struct AppConfig {
 
     #[serde(default = "defaults::db_min_connections")]
     pub database_min_connections: u32,
+
+    /// Connection string used ONLY for the one-time startup migration run
+    /// (`sqlx::migrate!`), which needs DDL privileges `database_url`'s
+    /// least-privilege runtime role deliberately does not have (CREATE
+    /// TABLE, ALTER TABLE, CREATE POLICY, ...). Falls back to
+    /// `database_url` when unset so a single-role local/dev setup (where
+    /// RLS enforcement doesn't matter) still works with one env var.
+    #[serde(default)]
+    pub migration_database_url: Option<String>,
 
     // ── Crypto ────────────────────────────────────────────────────────────
     /// Master key loaded by EnvKeyProvider at startup.
@@ -41,6 +56,23 @@ pub struct AppConfig {
     // ── Feature flags defaults ────────────────────────────────────────────
     #[serde(default)]
     pub sms_enabled: bool,
+
+    /// MSG91 auth key (the `authkey` header on their Flow API). Required
+    /// when `sms_enabled` is true; unused when false -- see
+    /// `SmsShareChannel::share`'s no-op-when-disabled behavior.
+    #[serde(default)]
+    pub sms_provider_api_key: Option<String>,
+
+    /// MSG91 DLT-approved sender id (6 chars, e.g. "VISITA"). Required when
+    /// `sms_enabled` is true.
+    #[serde(default)]
+    pub sms_sender_id: Option<String>,
+
+    /// MSG91 Flow API `flow_id`: the pre-approved DLT template that carries
+    /// the share message as its one free-text variable. Required when
+    /// `sms_enabled` is true.
+    #[serde(default)]
+    pub sms_flow_id: Option<String>,
 
     pub email_enabled: bool,
 
@@ -82,6 +114,17 @@ impl AppConfig {
         }
         if self.google_client_id.is_empty() {
             return Err("GOOGLE_CLIENT_ID is required".into());
+        }
+        if self.sms_enabled {
+            if self.sms_provider_api_key.as_deref().unwrap_or("").is_empty() {
+                return Err("SMS_PROVIDER_API_KEY is required when SMS_ENABLED=true".into());
+            }
+            if self.sms_sender_id.as_deref().unwrap_or("").is_empty() {
+                return Err("SMS_SENDER_ID is required when SMS_ENABLED=true".into());
+            }
+            if self.sms_flow_id.as_deref().unwrap_or("").is_empty() {
+                return Err("SMS_FLOW_ID is required when SMS_ENABLED=true".into());
+            }
         }
         Ok(())
     }

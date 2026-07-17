@@ -77,18 +77,26 @@ impl CreatePassUseCase {
         // ── 3. Fetch the active org signing key ────────────────────────────
         let org_key = self.orgs.find_active_key(ctx.org_id).await?;
 
-        // ── 4. Hash and encrypt visitor phone ─────────────────────────────
-        let phone_hmac = self.crypto.hmac_phone(&input.visitor_phone)?;
-        let phone_enc  = Some(self.crypto.encrypt_phone(Uuid::now_v7(), &input.visitor_phone)?);
+        // ── 4. Generate the pass's identity up front ───────────────────────
+        // This id is used for everything: the phone-encryption key salt
+        // below, the signed QR payload, and the persisted database row's
+        // own primary key (passed through to the repository so it doesn't
+        // generate a second, independent id of its own).
+        let pass_id = Uuid::now_v7();
 
-        // ── 5. Generate pass number (retry on collision) ───────────────────
+        // ── 5. Hash and encrypt visitor phone ─────────────────────────────
+        // Keyed by the pass's own id (not a throwaway value) so the
+        // ciphertext can always be re-derived and decrypted later, exactly
+        // like the ad-hoc-approval phone encryption (see request_approval).
+        let phone_hmac = self.crypto.hmac_phone(&input.visitor_phone)?;
+        let phone_enc  = Some(self.crypto.encrypt_phone(pass_id, &input.visitor_phone)?);
+
+        // ── 6. Generate pass number (retry on collision) ───────────────────
         let pass_number = self
             .generate_unique_pass_number(ctx)
             .await?;
 
-        let pass_id = Uuid::now_v7();
-
-        // ── 6. Build the QR payload ────────────────────────────────────────
+        // ── 7. Build the QR payload ────────────────────────────────────────
         // The private key is decrypted in the crypto service, used to sign,
         // then zeroed. It never crosses the network.
         let qr_output = self.crypto.build_qr_payload(&QrBuildInput {
@@ -109,8 +117,9 @@ impl CreatePassUseCase {
             encrypted_phone: phone_enc.clone(),
         })?;
 
-        // ── 7. Persist pass ────────────────────────────────────────────────
+        // ── 8. Persist pass ────────────────────────────────────────────────
         let db_input = crate::ports::repositories::CreatePassInput {
+            pass_id,
             org_id:             ctx.org_id,
             location_id:        input.location_id,
             created_by:         ctx.user_id,
@@ -130,10 +139,10 @@ impl CreatePassUseCase {
         };
         let pass = self.passes.create(ctx, db_input).await?;
 
-        // ── 8. Increment sync sequence ─────────────────────────────────────
+        // ── 9. Increment sync sequence ─────────────────────────────────────
         self.orgs.increment_sync_seq(ctx.org_id).await?;
 
-        // ── 9. Emit audit event (fire-and-forget) ─────────────────────────
+        // ── 10. Emit audit event (fire-and-forget) ─────────────────────────
         let _ = self.audit.append(AuditEventInput {
             org_id:             ctx.org_id,
             event_type:         "PASS_CREATED".into(),

@@ -26,7 +26,14 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     environment:
-      DATABASE_URL:              "postgres://visitorpass:${DB_PASSWORD}@postgres:5432/visitorpass"
+      # Runtime role -- least-privilege `visitorpass_app` (migration 024).
+      # RLS (migration 023) only has any effect through this role: the
+      # `visitorpass` bootstrap/owner role below is a Postgres superuser,
+      # and superusers bypass row-level security unconditionally.
+      DATABASE_URL:              "postgres://visitorpass_app:${APP_DB_PASSWORD}@postgres:5432/visitorpass"
+      # Migration-only role -- needs DDL rights the runtime role deliberately
+      # lacks. Used once at startup, then dropped (see main.rs).
+      MIGRATION_DATABASE_URL:    "postgres://visitorpass:${DB_PASSWORD}@postgres:5432/visitorpass"
       MASTER_KEY_HEX:            "${MASTER_KEY_HEX}"   # 64-char hex; from secrets manager
       BASE_URL:                  "${BASE_URL:-http://localhost}"
       HOST:                      "0.0.0.0"

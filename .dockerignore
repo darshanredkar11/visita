@@ -1,0 +1,20 @@
+# Allowlist approach: ignore everything by default, then explicitly
+# un-ignore exactly what docker/Dockerfile's COPY instructions need
+# (Cargo.toml, Cargo.lock, crates/, migrations/). This is deliberately
+# self-maintaining — new top-level dirs (web/, mobile/, docs, etc.) never
+# leak into the build context by accident; nothing needs updating here
+# unless the Dockerfile itself starts COPYing something new.
+*
+
+!Cargo.toml
+!Cargo.lock
+
+!crates
+!crates/**
+
+!migrations
+!migrations/**
+
+# Still exclude build output / caches even inside the allowlisted paths
+target/
+**/target/

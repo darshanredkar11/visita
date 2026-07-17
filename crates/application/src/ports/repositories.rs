@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use visitorpass_domain::{
-    entities::{Device, EntryLog, Location, OrgKey, Organization, User, VisitorPass},
-    value_objects::{OrgContext, Role},
+    entities::{DenialReason, Device, EntryLog, Location, OrgKey, Organization, PlatformAdmin, SubscriptionTier, User, VisitorPass},
+    value_objects::{OrgContext, PlatformContext, Role},
     DomainError,
 };
 
@@ -55,6 +55,64 @@ pub trait OrgRepository: Send + Sync + 'static {
     async fn get_active_join_token(&self, org_id: Uuid) -> Result<Option<String>, DomainError>;
     async fn verify_join_token(&self, token: &str) -> Result<Uuid, DomainError>;
     async fn add_membership_direct(&self, org_id: Uuid, user_id: Uuid, role: Role, unit_identifier: String) -> Result<(), DomainError>;
+    /// Cross-tenant: every organization on the platform, regardless of
+    /// caller membership. Takes `&PlatformContext`, never `&OrgContext` --
+    /// this is the entire reason that type distinction exists.
+    async fn list_all(&self, ctx: &PlatformContext) -> Result<Vec<Organization>, DomainError>;
+    /// Platform-admin-only: set an org's SaaS billing tier and plan
+    /// limits. Cross-tenant by definition (a platform admin has no
+    /// membership in the org being billed), hence `&PlatformContext`.
+    async fn set_subscription_tier(
+        &self,
+        ctx:              &PlatformContext,
+        org_id:           Uuid,
+        tier:             SubscriptionTier,
+        max_locations:    i32,
+        max_daily_passes: i32,
+    ) -> Result<(), DomainError>;
+    /// Platform-admin-only cross-tenant analytics ("Cross-Tenant
+    /// Analytics", product_specification.md section 2.1). Lives here
+    /// rather than on `EntryRepository` because it is fundamentally a
+    /// per-org rollup (joins `app.organizations` to `app.entry_logs`) and
+    /// keeps this addition out of `EntryRepository`/`entry.rs`, which a
+    /// concurrent phase owns.
+    async fn platform_metrics(&self, ctx: &PlatformContext) -> Result<PlatformMetrics, DomainError>;
+}
+
+/// See `OrgRepository::platform_metrics`. `total_check_ins` and
+/// `avg_sync_latency_seconds` are computed over the trailing 30 days
+/// (a platform health dashboard cares about current, not
+/// all-time-since-inception, load); `per_org` covers every non-deleted
+/// org, including ones with zero check-ins in the window.
+pub struct PlatformMetrics {
+    /// Count of `app.entry_logs` rows with `action = 'ENTRY'` in the last 30 days, across all orgs.
+    pub total_check_ins:          i64,
+    /// `AVG(server_received_at - occurred_at)` in seconds over the last 30 days, across all orgs and entry actions.
+    /// `None` when there are no entry logs in the window to average.
+    pub avg_sync_latency_seconds: Option<f64>,
+    pub per_org:                  Vec<OrgMetricsBreakdown>,
+}
+
+pub struct OrgMetricsBreakdown {
+    pub org_id:         Uuid,
+    pub org_name:       String,
+    /// `app.entry_logs` rows with `action = 'ENTRY'` for this org in the last 30 days.
+    pub check_in_count: i64,
+}
+
+// ─── Platform Admin Repository ────────────────────────────────────────────────
+//
+// Deliberately takes `&PlatformContext`, never `&OrgContext` -- these
+// queries are cross-tenant by definition. `is_platform_admin` is the one
+// exception: it takes a bare `user_id` because it runs during login,
+// *before* any context (org or platform) exists yet -- it is what decides
+// which kind of token to mint in the first place.
+#[async_trait]
+pub trait PlatformAdminRepository: Send + Sync + 'static {
+    async fn is_platform_admin(&self, user_id: Uuid) -> Result<bool, DomainError>;
+    async fn grant(&self, user_id: Uuid, granted_by: Option<Uuid>) -> Result<PlatformAdmin, DomainError>;
+    async fn revoke(&self, _ctx: &PlatformContext, user_id: Uuid) -> Result<(), DomainError>;
+    async fn list(&self, _ctx: &PlatformContext) -> Result<Vec<PlatformAdmin>, DomainError>;
 }
 
 // ─── User Repository ──────────────────────────────────────────────────────────
@@ -78,6 +136,16 @@ pub trait UserRepository: Send + Sync + 'static {
     async fn verify_email(&self, user_id: Uuid) -> Result<(), DomainError>;
     async fn find_membership_role(&self, user_id: Uuid, org_id: Uuid) -> Result<Role, DomainError>;
     async fn list_memberships(&self, user_id: Uuid) -> Result<Vec<(Uuid, String, Role, Option<String>)>, DomainError>;
+    /// Encrypted E.164 phone (`app.org_memberships.phone_enc`) for this
+    /// user's membership in `org_id`, if any. Decrypt with
+    /// `CryptoService::decrypt_phone(user_id, ..)`.
+    ///
+    /// NOTE: as of this writing, `phone_enc` is never WRITTEN by any code
+    /// path in this repo (no invite/join-org flow captures+encrypts a
+    /// member's phone yet) -- so this will always resolve to `Ok(None)`
+    /// until a future phase adds that capture. Wired now so SMS-fallback
+    /// notifications (`SyncEventsUseCase`) work correctly the moment it is.
+    async fn find_membership_phone_enc(&self, user_id: Uuid, org_id: Uuid) -> Result<Option<Vec<u8>>, DomainError>;
 }
 
 // ─── Location Repository ──────────────────────────────────────────────────────
@@ -126,7 +194,22 @@ pub trait DeviceRepository: Send + Sync + 'static {
         device_id: Uuid,
         reason: Option<String>,
     ) -> Result<Device, DomainError>;
-    async fn update_last_seen(&self, device_id: Uuid) -> Result<(), DomainError>;
+    /// Platform-admin-only: revoke a device regardless of which org it
+    /// belongs to ("Global Device Revocation", product_specification.md
+    /// section 2.1). Takes `&PlatformContext` instead of `&OrgContext` --
+    /// the caller does not, and must not need to, already know the
+    /// device's `org_id`.
+    async fn revoke_platform(
+        &self,
+        ctx:       &PlatformContext,
+        device_id: Uuid,
+        reason:    Option<String>,
+    ) -> Result<Device, DomainError>;
+    async fn update_last_seen(&self, device_id: Uuid, org_id: Uuid) -> Result<(), DomainError>;
+    /// Devices owned by `owner_user_id` (e.g. a resident's phone(s)) within
+    /// this org, ACTIVE only, most-recently-seen first. Used to find a
+    /// push-notification target for that resident.
+    async fn find_by_owner(&self, ctx: &OrgContext, owner_user_id: Uuid) -> Result<Vec<Device>, DomainError>;
     async fn get_sync_checkpoint(&self, device_id: Uuid, org_id: Uuid) -> Result<i64, DomainError>;
     async fn update_sync_checkpoint(
         &self,
@@ -139,6 +222,13 @@ pub trait DeviceRepository: Send + Sync + 'static {
 // ─── Pass Repository ──────────────────────────────────────────────────────────
 
 pub struct CreatePassInput {
+    /// The pass's identity, generated by the caller (CreatePassUseCase) --
+    /// this MUST be the same id already embedded (signed) in `qr_payload`'s
+    /// CBOR field 2 and used to derive `visitor_phone_enc`'s encryption key,
+    /// so the repository must persist it as-is rather than generating its
+    /// own. Previously it did generate its own, independently, meaning the
+    /// QR code's embedded pass_id never matched the actual database row.
+    pub pass_id:              Uuid,
     pub org_id:               Uuid,
     pub location_id:          Uuid,
     pub created_by:           Uuid,
@@ -207,7 +297,7 @@ pub struct CreateEntryInput {
     pub device_id:       Option<Uuid>,
     pub guard_user_id:   Option<Uuid>,
     pub action:          String,
-    pub denial_reason:   Option<String>,
+    pub denial_reason:   Option<DenialReason>,
     pub guard_note:      Option<String>,
     pub occurred_at:     DateTime<Utc>,
     pub client_event_id: Uuid,

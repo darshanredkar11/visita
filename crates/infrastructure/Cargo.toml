@@ -49,3 +49,21 @@ anyhow    = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+
+# HTTP client (SMS provider calls)
+reqwest = { workspace = true }
+
+# Share channels: WhatsApp deep links, PDF pass cards
+printpdf = { version = "0.11", default-features = false }
+qrcode   = { version = "0.14", default-features = false }
+percent-encoding = "2"
+
+# Dev/test-only lock usage (SMS mock's captured-call-args store)
+parking_lot = "0.12"
+
+[dev-dependencies]
+# Independent, low-level verification that generated PDFs really contain
+# the expected text in their content stream (see share/pdf.rs tests) --
+# deliberately NOT printpdf's own `extract_text()`, which has a known gap
+# for builtin (non-embedded) fonts after a parse round-trip.
+lopdf = { version = "0.44", default-features = false, features = ["time"] }

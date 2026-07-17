@@ -25,8 +25,14 @@ CREATE TABLE app.entry_logs (
 
 -- Global unique constraint prevents duplicate sync events across all partitions.
 -- Using a partial index on the parent table is more reliable than per-partition constraints.
+-- NOTE: Postgres requires unique indexes on partitioned tables to include the
+-- partition key column (created_at). This slightly widens the dedup window to
+-- "same partition month" instead of truly global, which is acceptable since
+-- client_event_id is generated at event-occurrence time (same month as created_at
+-- in all but a razor-thin midnight-boundary edge case, itself harmless: worst case
+-- is a rare duplicate row rather than data loss).
 CREATE UNIQUE INDEX idx_entry_logs_idempotency
-    ON app.entry_logs(org_id, client_event_id);
+    ON app.entry_logs(org_id, client_event_id, created_at);
 
 CREATE INDEX idx_entry_logs_pass     ON app.entry_logs(pass_id, created_at DESC);
 CREATE INDEX idx_entry_logs_org_loc  ON app.entry_logs(org_id, location_id, created_at DESC);

@@ -44,7 +44,15 @@ pub trait CryptoService: Send + Sync + 'static {
     fn hmac_phone(&self, phone_e164: &str) -> Result<String, DomainError>;
 
     /// Encrypt a phone number for storage (server decrypts to send notifications).
-    fn encrypt_phone(&self, pass_id: uuid::Uuid, phone_e164: &str) -> Result<Vec<u8>, DomainError>;
+    /// `record_id` must be the SAME id used later to call `decrypt_phone` --
+    /// it is the HKDF salt the per-record key is derived from, so it must be
+    /// something durably persisted alongside the ciphertext (e.g. the row's
+    /// own primary key), never a discarded/ephemeral value.
+    fn encrypt_phone(&self, record_id: uuid::Uuid, phone_e164: &str) -> Result<Vec<u8>, DomainError>;
+
+    /// Decrypt a phone number previously encrypted by `encrypt_phone`.
+    /// `record_id` must be the exact same id passed to `encrypt_phone`.
+    fn decrypt_phone(&self, record_id: uuid::Uuid, ciphertext: &[u8]) -> Result<String, DomainError>;
 
     /// Parse the QR header to retrieve metadata before verification.
     fn parse_qr_header(&self, qr_string: &str) -> Result<QrHeader, DomainError>;

@@ -39,6 +39,23 @@ CREATE TABLE ad_hoc_approval (
     created_at TEXT NOT NULL
 );
 
+-- The org's active Ed25519 public key, delivered via /api/v1/sync and
+-- refreshed on every sync -- guards use this to verify pass signatures
+-- fully offline. Single-row: a device is scoped to one org at a time,
+-- same as `session`.
+CREATE TABLE org_key (
+    key INTEGER PRIMARY KEY CHECK (key = 0),
+    org_id TEXT NOT NULL,
+    public_key BLOB NOT NULL,
+    key_version INTEGER NOT NULL
+);
+
+-- This device's last-synced sequence number for incremental sync. Single
+-- row, mirroring the backend's per-device checkpoint concept.
+CREATE TABLE sync_checkpoint (
+    key INTEGER PRIMARY KEY CHECK (key = 0),
+    last_seq INTEGER NOT NULL DEFAULT 0
+);
 -- Queries
 insertSession:
 INSERT OR REPLACE INTO session (key, token, role, org_id, unit_identifier, user_name)
@@ -76,3 +93,17 @@ UPDATE ad_hoc_approval SET status = ? WHERE id = ?;
 
 getPendingAdHocApprovals:
 SELECT * FROM ad_hoc_approval WHERE status = 'PENDING' ORDER BY created_at DESC;
+
+upsertOrgKey:
+INSERT OR REPLACE INTO org_key (key, org_id, public_key, key_version)
+VALUES (0, ?, ?, ?);
+
+getOrgKey:
+SELECT * FROM org_key WHERE key = 0 LIMIT 1;
+
+getSyncCheckpoint:
+SELECT * FROM sync_checkpoint WHERE key = 0 LIMIT 1;
+
+upsertSyncCheckpoint:
+INSERT OR REPLACE INTO sync_checkpoint (key, last_seq)
+VALUES (0, ?);

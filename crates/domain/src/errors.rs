@@ -97,9 +97,12 @@ pub enum DomainError {
     #[error("Cryptographic operation failed")]
     CryptoError,
 
-    // ── Retention ─────────────────────────────────────────────────────────
     #[error("Data export not yet ready")]
     ExportNotReady,
+
+    // ── Infrastructure (share channels: SMS provider calls, PDF/QR generation) ──
+    #[error("External operation failed: {0}")]
+    ExternalServiceError(String),
 }
 
 impl DomainError {
@@ -160,6 +163,7 @@ impl DomainError {
             DomainError::ValidityWindowTooLong   => "VALIDITY_WINDOW_TOO_LONG",
             DomainError::CryptoError             => "INTERNAL_ERROR",
             DomainError::ExportNotReady          => "EXPORT_NOT_READY",
+            DomainError::ExternalServiceError(_) => "EXTERNAL_SERVICE_ERROR",
         }
     }
 }

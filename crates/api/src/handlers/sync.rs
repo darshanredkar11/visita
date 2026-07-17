@@ -8,9 +8,10 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use visitorpass_domain::value_objects::{OrgContext, Role};
+use visitorpass_domain::{entities::DenialReason, value_objects::{OrgContext, Role}};
 use visitorpass_application::ports::repositories::AuditEventInput;
 use visitorpass_application::use_cases::sync_events::{SyncPushEvent, SyncRequest};
+use visitorpass_infrastructure::db::postgres::rls::org_scoped_tx;
 
 use crate::{errors::ApiError, state::{AppState, RealtimeEvent}};
 
@@ -43,6 +44,23 @@ pub async fn sync(
         return Err(ApiError::validation("events", "maximum 500 events per sync request"));
     }
 
+    // Validate denial_reason up front, for the WHOLE batch, before any
+    // event is processed: an unrecognized value must reject the request
+    // with 400 (and write zero rows), not get silently absorbed into
+    // SyncEventsUseCase's per-event rejected-events bucket (which returns
+    // 200 with a rejection_details entry -- correct for event-level
+    // business errors, but not for a malformed request body).
+    for event in &body.events {
+        if let Some(reason) = &event.denial_reason {
+            DenialReason::try_from(reason.as_str()).map_err(|_| {
+                ApiError::validation(
+                    "denial_reason",
+                    &format!("unrecognized denial reason: {reason}"),
+                )
+            })?;
+        }
+    }
+
     let events: Vec<SyncPushEvent> = body.events.into_iter().map(|e| SyncPushEvent {
         client_event_id: e.client_event_id,
         event_type:      e.event_type,
@@ -60,20 +78,32 @@ pub async fn sync(
         events,
     }).await?;
 
+    // Deliver the org's current active Ed25519 public key so guard devices
+    // can verify pass signatures fully offline -- previously never sent,
+    // forcing the mobile client to hardcode a mock key (see
+    // GuardKioskDashboard.kt). Devices cache this locally and refresh it on
+    // every sync; a key rotation propagates on the device's next sync.
+    let org_key = state.orgs.find_active_key(ctx.org_id).await?;
+
     Ok(Json(serde_json::json!({
         "new_sync_seq":      result.new_sync_seq,
         "events":            result.pull_events,
         "accepted":          result.accepted,
         "rejected":          result.rejected,
         "rejection_details": result.rejection_details,
+        "org_public_key":    hex::encode(&org_key.signing_public_key),
+        "org_key_version":   org_key.version,
     })))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, validator::Validate)]
 pub struct RequestApprovalRequest {
+    #[validate(length(max = 200), custom(function = "crate::validation::validate_non_empty_trimmed"))]
     pub visitor_name:    String,
+    #[validate(custom(function = "crate::validation::validate_e164_phone"))]
     pub visitor_phone:   String,
     pub location_id:     Uuid,
+    #[validate(length(max = 100), custom(function = "crate::validation::validate_non_empty_trimmed"))]
     pub unit_identifier: String,
 }
 
@@ -167,33 +197,41 @@ pub async fn request_approval(
     Extension(ctx): Extension<OrgContext>,
     Json(req): Json<RequestApprovalRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if req.visitor_name.trim().is_empty() {
-        return Err(ApiError::validation("visitor_name", "visitor name is required"));
-    }
-    if req.unit_identifier.trim().is_empty() {
-        return Err(ApiError::validation("unit_identifier", "unit identifier is required"));
-    }
+    use validator::Validate;
+    req.validate().map_err(crate::validation::validation_errors_to_api_error)?;
 
     let approval_id = Uuid::now_v7();
 
+    // Hash (for lookup/dedup) + encrypt (for storage) the visitor phone,
+    // mirroring app.visitor_passes' pattern exactly. The encryption key is
+    // derived from `approval_id` itself (persisted as the row's own primary
+    // key), so it can always be re-derived later to decrypt -- unlike
+    // CreatePassUseCase's phone_enc, which is (separately, pre-existing)
+    // derived from a throwaway UUID that's never stored anywhere.
+    let visitor_phone_hmac = state.crypto.hmac_phone(&req.visitor_phone)?;
+    let visitor_phone_enc = state.crypto.encrypt_phone(approval_id, &req.visitor_phone)?;
+
+    let mut tx = org_scoped_tx(&state.db_pool, ctx.org_id).await?;
     sqlx::query(
         r#"
-        INSERT INTO app.ad_hoc_approvals (id, org_id, location_id, visitor_name, visitor_phone, unit_identifier, status, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', NOW(), NOW())
+        INSERT INTO app.ad_hoc_approvals (id, org_id, location_id, visitor_name, visitor_phone_hmac, visitor_phone_enc, unit_identifier, status, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', NOW(), NOW())
         "#
     )
     .bind(approval_id)
     .bind(ctx.org_id)
     .bind(req.location_id)
     .bind(&req.visitor_name)
-    .bind(&req.visitor_phone)
+    .bind(&visitor_phone_hmac)
+    .bind(&visitor_phone_enc)
     .bind(&req.unit_identifier)
-    .execute(&state.db_pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "Failed to create ad-hoc approval request");
         ApiError::internal()
     })?;
+    tx.commit().await.map_err(|_| ApiError::internal())?;
 
     let payload = serde_json::json!({
         "event": "entry_pending",
@@ -227,6 +265,8 @@ pub async fn approve_entry(
     axum::extract::Path((_org_id, approval_id)): axum::extract::Path<(Uuid, Uuid)>,
     Json(req): Json<ApproveEntryRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let mut tx = org_scoped_tx(&state.db_pool, ctx.org_id).await?;
+
     // 1. Lookup approval request to get unit_identifier
     let approval: (Uuid, String) = sqlx::query_as(
         r#"
@@ -237,15 +277,15 @@ pub async fn approve_entry(
     )
     .bind(approval_id)
     .bind(ctx.org_id)
-    .fetch_optional(&state.db_pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|_| ApiError::internal())?
     .ok_or_else(|| ApiError::validation("approval_id", "Pending approval request not found or already processed"))?;
     
     let (_approval_id, unit_identifier) = approval;
     
-    // 2. Check if approver is ADMIN/OWNER (role-based override)
-    let is_admin_or_owner = matches!(ctx.role, Role::Admin | Role::Owner);
+    // 2. Check if approver is OrgAdmin (role-based override)
+    let is_admin_or_owner = ctx.role == Role::OrgAdmin;
     
     if !is_admin_or_owner {
         // 3. Verify approver's unit ownership
@@ -258,7 +298,7 @@ pub async fn approve_entry(
         )
         .bind(ctx.org_id)
         .bind(ctx.user_id)
-        .fetch_optional(&state.db_pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|_| ApiError::internal())?;
         
@@ -280,13 +320,14 @@ pub async fn approve_entry(
     .bind(status)
     .bind(approval_id)
     .bind(ctx.org_id)
-    .execute(&state.db_pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "Failed to update ad-hoc approval status");
         ApiError::internal()
     })?
     .rows_affected();
+    tx.commit().await.map_err(|_| ApiError::internal())?;
 
     if rows_affected == 0 {
         return Err(ApiError::internal()); // Should not happen given earlier check

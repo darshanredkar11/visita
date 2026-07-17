@@ -15,6 +15,13 @@ pub trait NotificationProvider: Send + Sync + 'static {
 
     /// Send an email.
     async fn send_email(&self, input: EmailInput) -> Result<(), DomainError>;
+
+    /// Send a push notification to a single device.
+    /// `device_token` is the device's `push_token` (FCM/APNs registration
+    /// token). Delivery failures (e.g. a stale/unregistered token) are
+    /// reported as `Err` but MUST NOT fail the caller's write path --
+    /// callers log-and-continue rather than propagate.
+    async fn send_push(&self, device_token: &str, title: &str, body: &str) -> Result<(), DomainError>;
 }
 
 pub struct EmailInput {
@@ -36,6 +43,11 @@ impl NotificationProvider for NoopNotificationProvider {
 
     async fn send_email(&self, input: EmailInput) -> Result<(), DomainError> {
         tracing::debug!(to = input.to, subject = input.subject, "NOOP: send_email");
+        Ok(())
+    }
+
+    async fn send_push(&self, device_token: &str, title: &str, body: &str) -> Result<(), DomainError> {
+        tracing::debug!(device_token, title, body_len = body.len(), "NOOP: send_push");
         Ok(())
     }
 }

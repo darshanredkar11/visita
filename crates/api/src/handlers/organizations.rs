@@ -103,9 +103,10 @@ pub async fn get_org(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, validator::Validate)]
 pub struct JoinByTokenRequest {
     pub token:           String,
+    #[validate(length(min = 1, max = 100), custom(function = "crate::validation::validate_non_empty_trimmed"))]
     pub unit_identifier: String,
 }
 
@@ -121,7 +122,7 @@ pub async fn generate_join_token(
     State(state): State<AppState>,
     Extension(ctx): Extension<OrgContext>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if ctx.role != visitorpass_domain::value_objects::Role::Owner && ctx.role != visitorpass_domain::value_objects::Role::Admin {
+    if ctx.role != visitorpass_domain::value_objects::Role::OrgAdmin {
         return Err(ApiError::forbidden("Only building administrators can manage join tokens"));
     }
 
@@ -137,7 +138,7 @@ pub async fn get_join_token(
     State(state): State<AppState>,
     Extension(ctx): Extension<OrgContext>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if ctx.role != visitorpass_domain::value_objects::Role::Owner && ctx.role != visitorpass_domain::value_objects::Role::Admin {
+    if ctx.role != visitorpass_domain::value_objects::Role::OrgAdmin {
         return Err(ApiError::forbidden("Only building administrators can manage join tokens"));
     }
 
@@ -158,9 +159,8 @@ pub async fn join_by_token(
     Extension(ctx): Extension<OrgContext>,
     Json(req): Json<JoinByTokenRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if req.unit_identifier.trim().is_empty() {
-        return Err(ApiError::validation("unit_identifier", "unit identifier/flat number is required"));
-    }
+    use validator::Validate;
+    req.validate().map_err(crate::validation::validation_errors_to_api_error)?;
 
     let org_id = state.orgs.verify_join_token(&req.token).await?;
 

@@ -13,8 +13,8 @@ import androidx.compose.ui.unit.sp
 import app.visitorpass.db.DatabaseHelper
 import app.visitorpass.net.KtorClient
 import app.visitorpass.db.Session
-import app.visitorpass.crypto.CryptoService
-import app.visitorpass.crypto.Base45
+import app.visitorpass.crypto.PassVerificationResult
+import app.visitorpass.crypto.verifyScannedPass
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -108,49 +108,35 @@ fun GuardKioskDashboard(
 
                     Button(
                         onClick = {
-                            if (!qrInput.startsWith("vp1.")) {
-                                validationResult = "INVALID FORMAT: Missing vp1 prefix"
+                            val orgKey = databaseHelper.queries.getOrgKey().executeAsOneOrNull()
+                            if (orgKey == null) {
+                                validationResult = "DENIED: No org signing key cached yet -- sync while online first"
                                 isValidState = false
                                 return@Button
                             }
-                            
-                            try {
-                                val encoded = qrInput.substring(4)
-                                val decodedBytes = Base45.decode(encoded)
-                                
-                                // Offline Cryptographic verification
-                                // In production, we'd load the org public key from the local database helper
-                                val mockOrgPublicKey = ByteArray(32) { 0 } // matching dev public key
-                                val messageBytes = decodedBytes.sliceArray(0 until (decodedBytes.size - 64))
-                                val signatureBytes = decodedBytes.sliceArray((decodedBytes.size - 64) until decodedBytes.size)
 
-                                val isSignatureValid = CryptoService.verifyEd25519(
-                                    publicKey = mockOrgPublicKey,
-                                    message = messageBytes,
-                                    signature = signatureBytes
-                                )
-
-                                if (isSignatureValid) {
-                                    validationResult = "VERIFIED: Pass Signature Authentic!"
+                            when (val result = verifyScannedPass(qrInput, orgKey.public_key)) {
+                                is PassVerificationResult.Verified -> {
+                                    validationResult = "VERIFIED: Pass Signature Authentic! (${result.visitorName})"
                                     isValidState = true
 
-                                    // Save log entry locally in SQLite
+                                    // Save log entry locally in SQLite using the REAL decoded
+                                    // pass_id and the REAL current device timestamp -- both
+                                    // were previously hardcoded placeholders.
                                     databaseHelper.queries.insertEntryLog(
                                         id = kotlinx.datetime.Clock.System.now().toEpochMilliseconds().toString(),
-                                        pass_id = "test_pass_id",
+                                        pass_id = result.passId,
                                         action = "ENTRY",
-                                        occurred_at = "2026-07-10T12:00:00Z",
+                                        occurred_at = kotlinx.datetime.Clock.System.now().toString(),
                                         synced = 0,
                                         denial_reason = null,
                                         guard_note = "Scanned at main gate"
                                     )
-                                } else {
-                                    validationResult = "DENIED: Cryptographic signature mismatch!"
+                                }
+                                is PassVerificationResult.Denied -> {
+                                    validationResult = "DENIED: ${result.reason}"
                                     isValidState = false
                                 }
-                            } catch (e: Exception) {
-                                validationResult = "DENIED: Malformed QR payload"
-                                isValidState = false
                             }
                         },
                         modifier = Modifier.fillMaxWidth(),

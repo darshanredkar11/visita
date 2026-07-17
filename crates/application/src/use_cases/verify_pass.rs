@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use uuid::Uuid;
 use visitorpass_domain::{
-    entities::{EntryAction, VisitorPass},
+    entities::DenialReason,
     value_objects::OrgContext,
     DomainError,
 };
@@ -30,7 +30,22 @@ pub struct VerifyPassOutput {
     pub valid_from:     chrono::DateTime<Utc>,
     pub valid_until:    chrono::DateTime<Utc>,
     pub status:         String,
-    pub denial_reason:  Option<String>,
+    pub denial_reason:  Option<DenialReason>,
+}
+
+/// Maps a `DomainError` from `VisitorPass::check_valid` to the structured
+/// `DenialReason` code exposed on `VerifyPassOutput`. Any other error
+/// variant reaching here is a caller bug (only the four pass-state errors
+/// are ever returned by `check_valid`), so it's mapped to `Other` rather
+/// than panicking.
+fn denial_reason_for(e: &DomainError) -> DenialReason {
+    match e {
+        DomainError::PassExpired            => DenialReason::PassExpired,
+        DomainError::PassRevoked { .. }     => DenialReason::PassRevoked,
+        DomainError::PassExhausted          => DenialReason::PassExhausted,
+        DomainError::PassNotYetValid { .. } => DenialReason::PassNotYetValid,
+        _                                   => DenialReason::Other,
+    }
 }
 
 /// Server-side QR verification.
@@ -95,7 +110,7 @@ impl VerifyPassUseCase {
                 valid_until:    chrono::DateTime::from_timestamp(verified.valid_until, 0)
                     .unwrap_or_default(),
                 status:         "DENIED".into(),
-                denial_reason:  Some("Pass issued by a different organization".into()),
+                denial_reason:  Some(DenialReason::CrossOrgMismatch),
             });
         }
 
@@ -106,7 +121,7 @@ impl VerifyPassUseCase {
             .unwrap_or_default();
 
         if now < valid_from || now > valid_until {
-            return Ok(self.denial_output(verified, "PASS_EXPIRED", valid_from, valid_until));
+            return Ok(self.denial_output(verified, DenialReason::PassExpired, valid_from, valid_until));
         }
 
         // ── 6. Check server-side pass status (revocation, use count) ───────
@@ -127,7 +142,10 @@ impl VerifyPassUseCase {
 
         // ── 7. Check server-side pass validity ─────────────────────────────
         if let Err(e) = pass.check_valid(now) {
-            let reason = format!("{}", e);
+            // The structured code goes on the API-facing output; the audit
+            // trail keeps the richer human-readable Display text (audit
+            // metadata is a free-form jsonb blob, not a validated enum).
+            let denial_reason = denial_reason_for(&e);
             let _ = self.audit.append(AuditEventInput {
                 org_id:             ctx.org_id,
                 event_type:         "ENTRY_DENIED".into(),
@@ -135,7 +153,7 @@ impl VerifyPassUseCase {
                 actor_device_id:    ctx.device_id,
                 target_entity_type: Some("visitor_pass".into()),
                 target_entity_id:   Some(pass.id),
-                metadata:           serde_json::json!({ "denial_reason": reason }),
+                metadata:           serde_json::json!({ "denial_reason": e.to_string() }),
                 ip_address:         None,
             }).await;
             return Ok(VerifyPassOutput {
@@ -149,7 +167,7 @@ impl VerifyPassUseCase {
                 valid_from,
                 valid_until,
                 status:         "DENIED".into(),
-                denial_reason:  Some(reason),
+                denial_reason:  Some(denial_reason),
             });
         }
 
@@ -172,7 +190,7 @@ impl VerifyPassUseCase {
     fn denial_output(
         &self,
         verified: VerifiedQrPayload,
-        reason: &str,
+        reason: DenialReason,
         valid_from: chrono::DateTime<Utc>,
         valid_until: chrono::DateTime<Utc>,
     ) -> VerifyPassOutput {
@@ -187,7 +205,7 @@ impl VerifyPassUseCase {
             valid_from,
             valid_until,
             status:         "DENIED".into(),
-            denial_reason:  Some(reason.into()),
+            denial_reason:  Some(reason),
         }
     }
 

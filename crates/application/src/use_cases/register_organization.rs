@@ -99,6 +99,9 @@ impl RegisterOrganizationUseCase {
             current_key_version: key_version,
             sync_seq:            0,
             timezone:            input.timezone.trim().to_string(),
+            subscription_tier:   visitorpass_domain::entities::SubscriptionTier::default(), // self-service signups start on Free
+            max_locations:       1,
+            max_daily_passes:    100,
             created_at:          Utc::now(),
             updated_at:          Utc::now(),
         };

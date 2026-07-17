@@ -23,6 +23,10 @@ pub struct RegisterDeviceRequest {
     pub platform:      Option<String>,
     pub os_version:    Option<String>,
     pub app_version:   Option<String>,
+    /// FCM/APNs push registration token for this device. Column is named
+    /// `push_token` (not `fcm_token`, despite that name appearing in some
+    /// task/spec text) -- see `app.devices.push_token`.
+    pub push_token:    Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,6 +76,7 @@ pub async fn register_device(
             platform:      req.platform,
             os_version:    req.os_version,
             app_version:   req.app_version,
+            push_token:    req.push_token,
         },
     ).await?;
 

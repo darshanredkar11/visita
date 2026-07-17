@@ -28,8 +28,8 @@ impl RevokeDeviceUseCase {
         device_id: Uuid,
         reason: Option<String>,
     ) -> Result<Device, DomainError> {
-        // Enforce role authorization: Admins or Owners can revoke devices
-        ctx.require_role(visitorpass_domain::value_objects::Role::Admin)?;
+        // Enforce role authorization: OrgAdmins can revoke devices
+        ctx.require_role(visitorpass_domain::value_objects::Role::OrgAdmin)?;
 
         // Revoke the device
         let device = self.devices.revoke(ctx, device_id, reason.clone()).await?;

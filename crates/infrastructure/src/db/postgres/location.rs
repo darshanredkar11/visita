@@ -22,8 +22,9 @@ impl PgLocationRepository {
 
 #[async_trait]
 impl LocationRepository for PgLocationRepository {
-    async fn create(&self, _ctx: &OrgContext, input: CreateLocationInput) -> Result<Location, DomainError> {
+    async fn create(&self, ctx: &OrgContext, input: CreateLocationInput) -> Result<Location, DomainError> {
         let location_id = Uuid::now_v7();
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         sqlx::query(
             r#"
             INSERT INTO app.locations (id, org_id, name, description, timezone, address_line, status, created_at, updated_at)
@@ -36,14 +37,16 @@ impl LocationRepository for PgLocationRepository {
         .bind(&input.description)
         .bind(&input.timezone)
         .bind(&input.address_line)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
-        self.find_by_id(_ctx, location_id).await
+        self.find_by_id(ctx, location_id).await
     }
 
     async fn find_by_id(&self, ctx: &OrgContext, id: Uuid) -> Result<Location, DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         let row = sqlx::query(
             r#"
             SELECT id, org_id, name, description, timezone, address_line, status::text, created_at, updated_at
@@ -53,10 +56,11 @@ impl LocationRepository for PgLocationRepository {
         )
         .bind(id)
         .bind(ctx.org_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?
         .ok_or(DomainError::LocationNotFound(id))?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         let status_str: String = row.get("status");
 
@@ -77,6 +81,7 @@ impl LocationRepository for PgLocationRepository {
     }
 
     async fn list(&self, ctx: &OrgContext, page: PageParams) -> Result<Page<Location>, DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         let mut query = String::from(
             r#"
             SELECT id, org_id, name, description, timezone, address_line, status::text, created_at, updated_at
@@ -108,7 +113,8 @@ impl LocationRepository for PgLocationRepository {
         }
         q = q.bind(page.limit + 1);
 
-        let rows = q.fetch_all(&self.pool).await.map_err(|_| DomainError::CryptoError)?;
+        let rows = q.fetch_all(&mut *tx).await.map_err(|_| DomainError::CryptoError)?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         let mut items = Vec::new();
         for row in rows {
@@ -150,6 +156,7 @@ impl LocationRepository for PgLocationRepository {
             LocationStatus::Deleted => "DELETED",
         };
 
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         sqlx::query(
             r#"
             UPDATE app.locations
@@ -164,14 +171,16 @@ impl LocationRepository for PgLocationRepository {
         .bind(&location.timezone)
         .bind(&location.address_line)
         .bind(status_str)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         self.find_by_id(ctx, location.id).await
     }
 
     async fn soft_delete(&self, ctx: &OrgContext, id: Uuid) -> Result<(), DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         sqlx::query(
             r#"
             UPDATE app.locations
@@ -181,9 +190,10 @@ impl LocationRepository for PgLocationRepository {
         )
         .bind(id)
         .bind(ctx.org_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         Ok(())
     }

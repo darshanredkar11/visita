@@ -309,8 +309,8 @@ impl CryptoService for DefaultCryptoService {
         Ok(hex::encode(result))
     }
 
-    fn encrypt_phone(&self, pass_id: Uuid, phone_e164: &str) -> Result<Vec<u8>, DomainError> {
-        let key = self.key_provider.derive_pass_phone_key(pass_id)?;
+    fn encrypt_phone(&self, record_id: Uuid, phone_e164: &str) -> Result<Vec<u8>, DomainError> {
+        let key = self.key_provider.derive_pass_phone_key(record_id)?;
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
         let nonce  = ChaCha20Poly1305::generate_nonce(&mut CcpOsRng);
         let mut ciphertext = cipher
@@ -320,6 +320,21 @@ impl CryptoService for DefaultCryptoService {
         let mut result = nonce.to_vec();
         result.append(&mut ciphertext);
         Ok(result)
+    }
+
+    fn decrypt_phone(&self, record_id: Uuid, ciphertext: &[u8]) -> Result<String, DomainError> {
+        // Nonce (12 bytes) is prepended to the ciphertext by encrypt_phone.
+        if ciphertext.len() < 12 {
+            return Err(DomainError::CryptoError);
+        }
+        let (nonce_bytes, encrypted) = ciphertext.split_at(12);
+        let key = self.key_provider.derive_pass_phone_key(record_id)?;
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let plaintext = cipher
+            .decrypt(nonce, encrypted)
+            .map_err(|_| DomainError::CryptoError)?;
+        String::from_utf8(plaintext).map_err(|_| DomainError::CryptoError)
     }
 
     fn parse_qr_header(&self, qr_string: &str) -> Result<QrHeader, DomainError> {

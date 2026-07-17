@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { LandingPage } from './pages/LandingPage';
 import { JoinPage } from './pages/JoinPage';
 import { GoogleLoginButton } from './components/GoogleLoginButton';
@@ -24,7 +24,7 @@ function App() {
   const inviteToken = queryParams.get('token') || '';
 
   // Auth States
-  const [token, setToken] = useState<string | null>(localStorage.getItem('vp_token'));
+  const [token, setToken] = useState<string | null>(null);
   const [role, setRole] = useState<string | null>(localStorage.getItem('vp_role'));
   const [orgId, setOrgId] = useState<string | null>(localStorage.getItem('vp_org_id'));
   const [user, setUser] = useState<User | null>(JSON.parse(localStorage.getItem('vp_user') || 'null'));
@@ -47,10 +47,54 @@ function App() {
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [loadingInvite, setLoadingInvite] = useState(false);
 
+  // The access token lives only in memory (never persisted), so a page
+  // refresh always loses it even though the backend's HttpOnly refresh
+  // cookie is still valid. If we previously scoped into an org (orgId
+  // survived in localStorage -- fine to persist, it isn't a secret),
+  // silently try to reacquire an access token via that cookie before
+  // forcing the user back through the full login flow. Guarded by a ref
+  // (not just the empty dep array) because StrictMode's dev-only
+  // double-invoke would otherwise fire this twice concurrently, racing
+  // two rotations of the same refresh token against each other.
+  const attemptedSilentRefresh = useRef(false);
+  useEffect(() => {
+    if (token || !orgId || attemptedSilentRefresh.current) return;
+    attemptedSilentRefresh.current = true;
+
+    (async () => {
+      try {
+        const res = await fetch('/api/v1/auth/refresh', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (!res.ok) throw new Error('refresh failed');
+        const data = await res.json();
+        setToken(data.access_token);
+        setRole(data.role);
+        localStorage.setItem('vp_role', data.role);
+        setPage('dashboard');
+      } catch {
+        // No valid refresh session (expired/revoked/never existed) --
+        // fall back to a clean logged-out state instead of showing a
+        // stale dashboard shell with no way to authenticate API calls.
+        localStorage.clear();
+        setRole(null);
+        setOrgId(null);
+        setUser(null);
+        setMemberships([]);
+        setPage('landing');
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleLoginSuccess = async (idToken: string) => {
     try {
       const res = await fetch('/api/v1/auth/google', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id_token: idToken }),
       });
@@ -69,14 +113,12 @@ function App() {
         setRole(data.role);
         const activeOrg = data.memberships[0].org_id;
         setOrgId(activeOrg);
-        localStorage.setItem('vp_token', data.access_token);
         localStorage.setItem('vp_role', data.role);
         localStorage.setItem('vp_org_id', activeOrg);
         setPage('dashboard');
       } else {
         // Global token (0 or >1 memberships)
         setToken(data.access_token); // fallback token
-        localStorage.setItem('vp_token', data.access_token || '');
         if (data.memberships.length > 0) {
           // Force select org screen by staying in login but prompting selection
           setRole(null);
@@ -99,7 +141,6 @@ function App() {
     setOrgId(activeOrgId);
 
     localStorage.setItem('vp_memberships', JSON.stringify(newMemberships));
-    localStorage.setItem('vp_token', activeToken);
     localStorage.setItem('vp_role', activeRole);
     localStorage.setItem('vp_org_id', activeOrgId);
 
@@ -109,12 +150,13 @@ function App() {
   };
 
   const handleSelectOrg = async (selectedOrgId: string) => {
-    const fallbackToken = localStorage.getItem('vp_token');
+    const fallbackToken = token;
     if (!fallbackToken) return;
 
     try {
       const res = await fetch('/api/v1/auth/select-org', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${fallbackToken}`
@@ -129,7 +171,6 @@ function App() {
       setRole(data.role);
       setOrgId(selectedOrgId);
 
-      localStorage.setItem('vp_token', data.access_token);
       localStorage.setItem('vp_role', data.role);
       localStorage.setItem('vp_org_id', selectedOrgId);
       setPage('dashboard');
@@ -139,6 +180,21 @@ function App() {
   };
 
   const handleLogout = () => {
+    // Best-effort, fire-and-forget: revoke the session server-side and
+    // clear the HttpOnly cookie. The cookie is unreachable from JS
+    // (that's the point), so there is no client-side equivalent of
+    // `localStorage.clear()` for it -- the backend must be told to drop
+    // it, or a stolen/leaked cookie would remain valid for its full
+    // 30-day lifetime after the user believes they've logged out. Not
+    // awaited: logout should feel instant, and there's nothing useful to
+    // do differently if this request fails.
+    fetch('/api/v1/auth/logout', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }).catch(() => {});
+
     localStorage.clear();
     setToken(null);
     setRole(null);
@@ -164,6 +220,7 @@ function App() {
     try {
       const res = await fetch(`/api/v1/organizations/${orgId}/passes`, {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
@@ -200,6 +257,7 @@ function App() {
     try {
       const res = await fetch(`/api/v1/organizations/${orgId}/join-token`, {
         method: 'GET',
+        credentials: 'include',
         headers: {
           'Authorization': `Bearer ${token}`
         }
@@ -405,7 +463,7 @@ function App() {
               </div>
 
               {/* Secretary Group Invite Link Generation Block */}
-              {(role === 'OWNER' || role === 'ADMIN') && (
+              {role === 'ORG_ADMIN' && (
                 <div className="glass-card" style={{ borderLeft: '4px solid var(--color-accent)' }}>
                   <h3 style={{ fontSize: '1.2rem', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <Users size={20} color="var(--color-accent)" /> Group Onboarding QR

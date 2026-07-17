@@ -12,7 +12,9 @@ mod errors;
 mod handlers;
 mod middleware;
 mod router;
+mod scheduler;
 mod state;
+mod validation;
 
 #[cfg(test)]
 mod tests;
@@ -45,7 +47,28 @@ async fn main() {
     let key_provider: Arc<dyn visitorpass_application::ports::KeyProvider> =
         Arc::new(EnvKeyProvider::from_env());
 
-    // ── 4. Connect to PostgreSQL ─────────────────────────────────────────
+    // ── 4. Run pending migrations via a SEPARATE, privileged connection ───
+    // Migrations need DDL rights (CREATE TABLE, CREATE POLICY, ...) that
+    // `database_url`'s runtime role deliberately does not have -- see
+    // AppConfig::migration_database_url and migration 024. Kept alive (not
+    // closed) after migrations run: the scheduler's partition-maintenance
+    // jobs (`CREATE TABLE ... PARTITION OF`) also need DDL rights the
+    // runtime pool below deliberately lacks.
+    let migration_url = config.migration_database_url.clone().unwrap_or_else(|| config.database_url.clone());
+    let privileged_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&migration_url)
+        .await
+        .expect("Failed to connect to PostgreSQL for migrations");
+
+    sqlx::migrate!("../../migrations")
+        .run(&privileged_pool)
+        .await
+        .expect("Failed to run database migrations");
+    tracing::info!("Migrations applied");
+
+    // ── 5. Connect the runtime pool -- least-privilege role (see
+    // AppConfig::database_url's doc comment), used for every request ─────
     let db_pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
         .min_connections(config.database_min_connections)
@@ -55,13 +78,9 @@ async fn main() {
 
     tracing::info!("PostgreSQL connected");
 
-    // ── 5. Run pending migrations ────────────────────────────────────────
-    sqlx::migrate!("../../migrations")
-        .run(&db_pool)
-        .await
-        .expect("Failed to run database migrations");
-
-    tracing::info!("Migrations applied");
+    // ── 5b. Start background maintenance jobs (pass expiry, session/
+    // challenge cleanup, partition creation, retention enforcement) ───────
+    scheduler::spawn_background_jobs(db_pool.clone(), privileged_pool);
 
     // ── 6. Build infrastructure implementations ──────────────────────────
     let crypto: Arc<dyn visitorpass_application::ports::CryptoService> =
@@ -82,10 +101,24 @@ async fn main() {
         Arc::new(visitorpass_infrastructure::db::postgres::PgLocationRepository::new(db_pool.clone()));
     let audit: Arc<dyn visitorpass_application::ports::AuditRepository> =
         Arc::new(visitorpass_infrastructure::db::postgres::PgAuditRepository::new(db_pool.clone()));
+    let platform_admins: Arc<dyn visitorpass_application::ports::PlatformAdminRepository> =
+        Arc::new(visitorpass_infrastructure::db::postgres::PgPlatformAdminRepository::new(db_pool.clone()));
 
     // Notifications
-    let notifier = Arc::new(
+    let notifier: Arc<dyn visitorpass_application::ports::NotificationProvider> = Arc::new(
         visitorpass_application::ports::notification_provider::NoopNotificationProvider
+    );
+
+    // Share channels (WhatsApp deep link generator, SMS via MSG91)
+    let whatsapp_channel: Arc<dyn visitorpass_application::ports::ShareChannel> =
+        Arc::new(visitorpass_infrastructure::share::WhatsAppShareChannel::new());
+    let sms_channel: Arc<dyn visitorpass_application::ports::ShareChannel> = Arc::new(
+        visitorpass_infrastructure::share::SmsShareChannel::msg91(
+            config.sms_enabled,
+            config.sms_provider_api_key.clone().unwrap_or_default(),
+            config.sms_sender_id.clone().unwrap_or_default(),
+            config.sms_flow_id.clone().unwrap_or_default(),
+        )
     );
 
     // ── 7. Wire use cases ────────────────────────────────────────────────
@@ -146,7 +179,11 @@ async fn main() {
             Arc::clone(&passes),
             Arc::clone(&entries),
             Arc::clone(&orgs),
+            Arc::clone(&users),
+            Arc::clone(&crypto),
             Arc::clone(&audit),
+            Arc::clone(&notifier),
+            config.sms_enabled,
         )
     );
 
@@ -172,8 +209,13 @@ async fn main() {
         devices:   Arc::clone(&devices),
         locations: Arc::clone(&locations),
         audit:     Arc::clone(&audit),
+        platform_admins: Arc::clone(&platform_admins),
+        notifier: Arc::clone(&notifier),
+        whatsapp_channel,
+        sms_channel,
         broadcast_tx,
         rate_limiter: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        jwks_cache: Arc::new(handlers::google_auth::JwksCache::new()),
     };
 
     // ── 9. Build router ──────────────────────────────────────────────────

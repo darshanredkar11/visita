@@ -46,6 +46,7 @@ kotlin {
         val commonTest by getting {
             dependencies {
                 implementation(kotlin("test"))
+                implementation("io.ktor:ktor-client-mock:2.3.8")
             }
         }
         
@@ -53,6 +54,16 @@ kotlin {
             dependencies {
                 implementation("app.cash.sqldelight:android-driver:2.0.1")
                 implementation("io.ktor:ktor-client-okhttp:2.3.8")
+            }
+        }
+
+        val androidUnitTest by getting {
+            dependencies {
+                // JVM-only JDBC SQLite driver: NOT multiplatform, so it must
+                // live here (compiled only for the Android/JVM unit test
+                // variant, i.e. `testDebugUnitTest`) rather than commonTest,
+                // which is also compiled for the iOS targets above.
+                implementation("app.cash.sqldelight:sqlite-driver:2.0.1")
             }
         }
         
@@ -79,6 +90,15 @@ android {
     compileSdk = 34
     defaultConfig {
         minSdk = 26
+    }
+    testOptions {
+        unitTests.all {
+            it.testLogging {
+                events("passed", "failed", "skipped")
+                showStandardStreams = false
+                exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+            }
+        }
     }
 }
 

@@ -33,6 +33,7 @@ export const JoinPage: React.FC<JoinPageProps> = ({ inviteToken, onJoinSuccess }
       // 1. Authenticate with backend using Google Token
       const res = await fetch('/api/v1/auth/google', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id_token: idToken }),
       });
@@ -67,6 +68,7 @@ export const JoinPage: React.FC<JoinPageProps> = ({ inviteToken, onJoinSuccess }
       // 2. Onboard to Org using Group Join Token
       const res = await fetch('/api/v1/organizations/join-by-token', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${userIdToken}`
@@ -95,6 +97,7 @@ export const JoinPage: React.FC<JoinPageProps> = ({ inviteToken, onJoinSuccess }
       // Request a scoped token
       const tokenRes = await fetch('/api/v1/auth/select-org', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${userIdToken}`

@@ -1,7 +1,9 @@
 package app.visitorpass.net
 
 import app.visitorpass.db.DatabaseHelper
+import app.visitorpass.security.SecureTokenStore
 import io.ktor.client.HttpClient
+import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.header
 import io.ktor.client.request.get
@@ -10,6 +12,7 @@ import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.Serializable
@@ -39,14 +42,29 @@ data class AdHocApprovalRequest(
 
 class KtorClient(
     private val databaseHelper: DatabaseHelper,
-    private val baseUrl: String = "http://10.0.2.2:8080" // Default Android loopback emulator address
+    private val secureTokenStore: SecureTokenStore,
+    private val baseUrl: String = "http://10.0.2.2:8080", // Default Android loopback emulator address
+    // Injectable HTTP engine so tests can substitute a MockEngine instead of
+    // making a real network call. Defaults to Ktor's platform-default engine.
+    engine: HttpClientEngine? = null
 ) {
-    val client = HttpClient {
-        install(ContentNegotiation) {
-            json(Json {
-                ignoreUnknownKeys = true
-                prettyPrint = true
-            })
+    val client = if (engine != null) {
+        HttpClient(engine) {
+            install(ContentNegotiation) {
+                json(Json {
+                    ignoreUnknownKeys = true
+                    prettyPrint = true
+                })
+            }
+        }
+    } else {
+        HttpClient {
+            install(ContentNegotiation) {
+                json(Json {
+                    ignoreUnknownKeys = true
+                    prettyPrint = true
+                })
+            }
         }
     }
 
@@ -54,11 +72,36 @@ class KtorClient(
         return databaseHelper.queries.getSession().executeAsOneOrNull()?.token
     }
 
+    /**
+     * The backend hands the refresh token to browsers as a `Set-Cookie`
+     * header (never in the JSON body -- see `auth.rs`'s cookie helpers);
+     * mobile has no browser cookie jar, so it reads that header manually
+     * and re-sends the value as a plain `Cookie` header on the next call,
+     * exactly like a browser would. `name` is matched against the
+     * `name=value` pair BEFORE the first `;` (the attributes -- `HttpOnly`,
+     * `Path`, etc. -- are meaningless off-browser and ignored).
+     */
+    private fun extractCookieValue(response: HttpResponse, name: String): String? {
+        val setCookieHeaders = response.headers.getAll(HttpHeaders.SetCookie) ?: return null
+        for (rawHeader in setCookieHeaders) {
+            val pair = rawHeader.substringBefore(';').trim()
+            val eq = pair.indexOf('=')
+            if (eq <= 0) continue
+            if (pair.substring(0, eq) == name) return pair.substring(eq + 1)
+        }
+        return null
+    }
+
+    /** `Cookie` request header built from the persisted refresh token, if any. */
+    private fun refreshCookieHeaderOrNull(): String? =
+        secureTokenStore.getRefreshToken()?.let { "refresh_token=$it" }
+
     suspend fun loginWithGoogle(idToken: String): String {
         val response = client.post("$baseUrl/api/v1/auth/google") {
             contentType(ContentType.Application.Json)
             setBody(GoogleAuthRequest(idToken))
         }
+        extractCookieValue(response, "refresh_token")?.let { secureTokenStore.saveRefreshToken(it) }
         return response.bodyAsText()
     }
 
@@ -69,7 +112,47 @@ class KtorClient(
             token?.let { header("Authorization", "Bearer $it") }
             setBody(SelectOrgRequest(orgId))
         }
+        extractCookieValue(response, "refresh_token")?.let { secureTokenStore.saveRefreshToken(it) }
         return response.bodyAsText()
+    }
+
+    /**
+     * Exchanges the persisted refresh token (Keystore-encrypted, see
+     * [SecureTokenStore]) for a fresh access token, and persists the
+     * rotated refresh token the backend returns alongside it. Mirrors the
+     * `/auth/refresh` contract's rotate-on-use semantics -- the OLD stored
+     * token is no longer valid after this call succeeds.
+     */
+    suspend fun refreshAccessToken(): String {
+        val response = client.post("$baseUrl/api/v1/auth/refresh") {
+            contentType(ContentType.Application.Json)
+            refreshCookieHeaderOrNull()?.let { header(HttpHeaders.Cookie, it) }
+            setBody("{}")
+        }
+        extractCookieValue(response, "refresh_token")?.let { secureTokenStore.saveRefreshToken(it) }
+        return response.bodyAsText()
+    }
+
+    /** Revokes the session server-side and clears the locally persisted refresh token. */
+    suspend fun logout(): String {
+        val response = client.post("$baseUrl/api/v1/auth/logout") {
+            contentType(ContentType.Application.Json)
+            refreshCookieHeaderOrNull()?.let { header(HttpHeaders.Cookie, it) }
+            setBody("{}")
+        }
+        secureTokenStore.clearRefreshToken()
+        return response.bodyAsText()
+    }
+
+    /**
+     * Synchronous, local-only counterpart to [logout] for UI call sites
+     * that clear session state outside a coroutine (see
+     * `RootNavigation.kt`'s `onLogout`) -- clears the persisted refresh
+     * token without calling the backend. Prefer [logout] when a suspend
+     * context is available, since it also revokes the session server-side.
+     */
+    fun clearLocalSession() {
+        secureTokenStore.clearRefreshToken()
     }
 
     suspend fun createPass(visitorName: String, visitorPhone: String, validFrom: String, validUntil: String): String {

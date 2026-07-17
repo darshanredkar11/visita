@@ -185,6 +185,7 @@ impl UserRepository for PgUserRepository {
     }
 
     async fn find_membership_role(&self, user_id: Uuid, org_id: Uuid) -> Result<Role, DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, org_id).await?;
         let row = sqlx::query(
             r#"
             SELECT role::text
@@ -194,19 +195,25 @@ impl UserRepository for PgUserRepository {
         )
         .bind(user_id)
         .bind(org_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?
         .ok_or(DomainError::InsufficientRole {
             required: "Active membership".into(),
             actual:   "None".into(),
         })?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         let role_str: String = row.get("role");
         Role::try_from(role_str.as_str())
     }
 
     async fn list_memberships(&self, user_id: Uuid) -> Result<Vec<(Uuid, String, Role, Option<String>)>, DomainError> {
+        // RLS bypass (reason 2, see rls.rs): the whole point of this query
+        // is to discover every org this user belongs to (shown as the
+        // org-selector after login) -- there is no single org to scope to
+        // yet, and there may be several.
+        let mut tx = super::rls::bypass_scoped_tx(&self.pool).await?;
         let rows = sqlx::query(
             r#"
             SELECT m.org_id, o.name as org_name, m.role::text, m.unit_identifier
@@ -216,12 +223,13 @@ impl UserRepository for PgUserRepository {
             "#,
         )
         .bind(user_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to query user memberships");
             DomainError::CryptoError
         })?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         let mut results = Vec::new();
         for r in rows {
@@ -234,5 +242,27 @@ impl UserRepository for PgUserRepository {
         }
 
         Ok(results)
+    }
+
+    async fn find_membership_phone_enc(&self, user_id: Uuid, org_id: Uuid) -> Result<Option<Vec<u8>>, DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, org_id).await?;
+        let row = sqlx::query(
+            r#"
+            SELECT phone_enc
+            FROM app.org_memberships
+            WHERE user_id = $1 AND org_id = $2 AND status = 'ACTIVE'::app.member_status
+            "#,
+        )
+        .bind(user_id)
+        .bind(org_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "find_membership_phone_enc DB error");
+            DomainError::CryptoError
+        })?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
+
+        Ok(row.and_then(|r| r.get::<Option<Vec<u8>>, _>("phone_enc")))
     }
 }

@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="app.visitorpass.sync.SyncEngineTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-07-10T09:39:41" hostname="Darshans-Laptop.local" time="0.0">
-  <properties/>
-  <testcase name="testSyncEngineInstantiation" classname="app.visitorpass.sync.SyncEngineTest" time="0.0"/>
-  <system-out><![CDATA[]]></system-out>
-  <system-err><![CDATA[]]></system-err>
-</testsuite>

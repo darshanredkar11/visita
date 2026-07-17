@@ -67,6 +67,53 @@ pub enum OrgStatus {
     Deleted,
 }
 
+/// SaaS billing tier (Platform Super-Admin Portal -- "Global Billing &
+/// Subscriptions", product_specification.md section 2.1).
+///
+/// Stored as plain TEXT in `app.organizations.subscription_tier`
+/// (migration 026), not a Postgres enum type -- see that migration's
+/// comment. Mirrors the `OrgType`/`OrgStatus` as_str()/TryFrom pattern
+/// used elsewhere in this file for the Rust-side validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SubscriptionTier {
+    Free,
+    Pro,
+    Enterprise,
+}
+
+impl SubscriptionTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SubscriptionTier::Free       => "FREE",
+            SubscriptionTier::Pro        => "PRO",
+            SubscriptionTier::Enterprise => "ENTERPRISE",
+        }
+    }
+}
+
+impl Default for SubscriptionTier {
+    fn default() -> Self {
+        SubscriptionTier::Free
+    }
+}
+
+impl TryFrom<&str> for SubscriptionTier {
+    type Error = crate::DomainError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "FREE"       => Ok(SubscriptionTier::Free),
+            "PRO"        => Ok(SubscriptionTier::Pro),
+            "ENTERPRISE" => Ok(SubscriptionTier::Enterprise),
+            _ => Err(crate::DomainError::ValidationFailed {
+                field:   "subscription_tier".into(),
+                message: format!("unknown subscription tier: {s}"),
+            }),
+        }
+    }
+}
+
 /// Organization entity. Root aggregate of all org-scoped data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Organization {
@@ -81,6 +128,15 @@ pub struct Organization {
     /// Used by mobile devices for incremental sync.
     pub sync_seq:            i64,
     pub timezone:            String,
+    /// SaaS billing tier. Defaults to `Free` for orgs created before
+    /// migration 026 and for self-service registrations (see
+    /// `RegisterOrganizationUseCase`); platform admins upgrade it via
+    /// `OrgRepository::set_subscription_tier`.
+    pub subscription_tier:   SubscriptionTier,
+    /// Plan limit: max active locations this org may have.
+    pub max_locations:       i32,
+    /// Plan limit: max visitor passes this org may create per rolling 24h.
+    pub max_daily_passes:    i32,
     pub created_at:          DateTime<Utc>,
     pub updated_at:          DateTime<Utc>,
 }

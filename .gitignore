@@ -1,25 +1,54 @@
-# Binaries and build artifacts
+# ── Rust ─────────────────────────────────────────────────────────────────────
 /target/
 **/target/
+**/*.rs.bk
 
-# Environment — NEVER commit
+# SQLx query cache (safe to commit for CI offline mode; this project uses
+# runtime sqlx::query(), not compile-time query! macros, so it's unused —
+# left ignored until/unless that changes).
+.sqlx/
+
+# ── Environment / secrets — NEVER commit ────────────────────────────────────
 .env
-.env.local
-.env.production
+.env.*
+!.env.example
 
-# IDE
-.idea/
+# ── Web (web/) ───────────────────────────────────────────────────────────────
+**/node_modules/
+web/dist/
+web/build/
+web/coverage/
+web/test-results/
+web/playwright-report/
+web/.vite/
+
+# ── Mobile (mobile/) — Kotlin Multiplatform / Android / Gradle ─────────────────
+**/.gradle/
+**/build/
+mobile/local.properties
+mobile/**/local.properties
+**/.kotlin/
+*.jks
+*.keystore
+*.p12
+google-services.json
+GoogleService-Info.plist
+
+# ── IDE ──────────────────────────────────────────────────────────────────────
+**/.idea/
 .vscode/
 *.iml
 
-# macOS
+# ── macOS ────────────────────────────────────────────────────────────────────
 .DS_Store
 
-# SQLx query cache (can be committed to enable offline mode in CI)
-# .sqlx/
-
-# Logs
+# ── Logs ─────────────────────────────────────────────────────────────────────
 *.log
 
-# Test artifacts
+# ── Test artifacts ───────────────────────────────────────────────────────────
 /test_output/
+
+# ── Agent / scratch working directories — not project source ───────────────
+.claude/
+.arjun/
+scratchpad/

@@ -1,23 +1,27 @@
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use visitorpass_domain::value_objects::OrgContext;
+use visitorpass_application::ports::{ShareChannel, SharePassInput};
+use visitorpass_domain::{entities::DenialReason, value_objects::OrgContext};
 
 use crate::{errors::ApiError, state::AppState};
 
 // ── Request / Response DTOs ───────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, validator::Validate)]
 pub struct CreatePassRequest {
     pub location_id:    Uuid,
+    #[validate(length(max = 200), custom(function = "crate::validation::validate_non_empty_trimmed"))]
     pub visitor_name:   String,
+    #[validate(custom(function = "crate::validation::validate_e164_phone"))]
     pub visitor_phone:  String,
+    #[validate(length(max = 500), custom(function = "crate::validation::validate_non_empty_trimmed"))]
     pub purpose:        String,
     pub vehicle_number: Option<String>,
     #[serde(default = "default_permissions")]
@@ -87,7 +91,13 @@ pub struct VerifyPassResponse {
     pub valid_from:     chrono::DateTime<Utc>,
     pub valid_until:    chrono::DateTime<Utc>,
     pub status:         String,
-    pub denial_reason:  Option<String>,
+    pub denial_reason:  Option<DenialReason>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SharePassRequest {
+    /// "whatsapp" | "sms"
+    pub channel: String,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -98,16 +108,8 @@ pub async fn create_pass(
     Extension(ctx): Extension<OrgContext>,
     Json(req): Json<CreatePassRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Basic input validation
-    if req.visitor_name.trim().is_empty() {
-        return Err(ApiError::validation("visitor_name", "must not be empty"));
-    }
-    if req.purpose.trim().is_empty() {
-        return Err(ApiError::validation("purpose", "must not be empty"));
-    }
-    if req.visitor_phone.is_empty() || !req.visitor_phone.starts_with('+') {
-        return Err(ApiError::validation("visitor_phone", "must be in E.164 format"));
-    }
+    use validator::Validate;
+    req.validate().map_err(crate::validation::validation_errors_to_api_error)?;
 
     let output = state.create_pass.execute(
         &ctx,
@@ -304,4 +306,100 @@ pub async fn verify_pass(
         status:         output.status,
         denial_reason:  output.denial_reason,
     }))
+}
+
+/// GET /api/v1/organizations/:org_id/passes/:pass_id/pdf
+///
+/// Renders a branded, downloadable pass card as `application/pdf`. Not a
+/// `ShareChannel` -- a document to fetch/attach, not something dispatched
+/// to a recipient.
+pub async fn pass_pdf(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<OrgContext>,
+    axum::extract::Path(params): axum::extract::Path<std::collections::HashMap<String, String>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let pass_id = params
+        .get("pass_id")
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or_else(|| ApiError::validation("pass_id", "must be a valid UUID"))?;
+
+    let pass = state.passes.find_by_id(&ctx, pass_id).await?;
+    let org = state.orgs.find_by_id(&ctx, ctx.org_id).await?;
+
+    let pdf_bytes = visitorpass_infrastructure::share::generate_pass_pdf(
+        &org.name,
+        &pass.visitor_name,
+        pass.pass_number.as_str(),
+        &pass.qr_payload,
+        pass.valid_from,
+        pass.valid_until,
+    )?;
+
+    // Pass numbers are base36 [0-9A-Z] (see `PassNumber`), always a safe,
+    // unescaped `filename=` value -- the fallback is defensive, not
+    // expected to trigger.
+    let disposition = format!("attachment; filename=\"visitorpass-{}.pdf\"", pass.pass_number.as_str());
+    let disposition_header =
+        HeaderValue::from_str(&disposition).unwrap_or_else(|_| HeaderValue::from_static("attachment"));
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("application/pdf")),
+            (header::CONTENT_DISPOSITION, disposition_header),
+        ],
+        pdf_bytes,
+    ))
+}
+
+/// POST /api/v1/organizations/:org_id/passes/:pass_id/share
+///
+/// Distributes the pass's public share link to its visitor over the
+/// requested channel (`{"channel": "whatsapp" | "sms"}`). The visitor's
+/// phone is never stored in plaintext -- it is decrypted here from
+/// `visitor_phone_enc` (the same ciphertext/record-id pair `CreatePassUseCase`
+/// wrote) for exactly this call, never persisted or logged.
+pub async fn share_pass(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<OrgContext>,
+    axum::extract::Path(params): axum::extract::Path<std::collections::HashMap<String, String>>,
+    Json(req): Json<SharePassRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let pass_id = params
+        .get("pass_id")
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or_else(|| ApiError::validation("pass_id", "must be a valid UUID"))?;
+
+    let channel: &std::sync::Arc<dyn ShareChannel> = match req.channel.as_str() {
+        "whatsapp" => &state.whatsapp_channel,
+        "sms" => &state.sms_channel,
+        other => {
+            return Err(ApiError::validation(
+                "channel",
+                &format!("unsupported channel '{other}'; expected 'whatsapp' or 'sms'"),
+            ))
+        }
+    };
+
+    let pass = state.passes.find_by_id(&ctx, pass_id).await?;
+    let org = state.orgs.find_by_id(&ctx, ctx.org_id).await?;
+
+    let phone_enc = pass
+        .visitor_phone_enc
+        .as_ref()
+        .ok_or_else(|| ApiError::validation("pass_id", "this pass has no recipient phone on file to share with"))?;
+    let recipient_phone = state.crypto.decrypt_phone(pass.id, phone_enc)?;
+    let share_url = format!("{}/v/{}", state.config.base_url, pass.pass_number.as_str());
+
+    let result = channel
+        .share(SharePassInput {
+            recipient_phone,
+            visitor_name: pass.visitor_name.clone(),
+            share_url,
+            org_name: org.name.clone(),
+            valid_until: pass.valid_until,
+        })
+        .await?;
+
+    Ok(Json(result))
 }

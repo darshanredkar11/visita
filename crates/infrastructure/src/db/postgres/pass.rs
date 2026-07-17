@@ -23,12 +23,19 @@ impl PgPassRepository {
 
 #[async_trait]
 impl PassRepository for PgPassRepository {
-    async fn create(&self, _ctx: &OrgContext, input: CreatePassInput) -> Result<VisitorPass, DomainError> {
-        let pass_id = Uuid::now_v7();
+    async fn create(&self, ctx: &OrgContext, input: CreatePassInput) -> Result<VisitorPass, DomainError> {
+        // Use the caller's id, not a freshly generated one: CreatePassUseCase
+        // already embedded this exact id in the signed QR payload (CBOR
+        // field 2) and used it to derive visitor_phone_enc's encryption key
+        // before calling here. Generating a second, independent id at this
+        // layer (as this used to do) would mean every QR code's embedded
+        // pass_id permanently mismatched its own database row.
+        let pass_id = input.pass_id;
 
         // Convert permissions from string representations
         let permissions_str: Vec<String> = input.permissions;
 
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         sqlx::query(
             r#"
             INSERT INTO app.visitor_passes (
@@ -60,17 +67,19 @@ impl PassRepository for PgPassRepository {
         .bind(&input.qr_payload)
         .bind(&input.qr_nonce)
         .bind(input.key_version)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to create visitor pass in database");
             DomainError::CryptoError
         })?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
-        self.find_by_id(_ctx, pass_id).await
+        self.find_by_id(ctx, pass_id).await
     }
 
     async fn find_by_id(&self, ctx: &OrgContext, id: Uuid) -> Result<VisitorPass, DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         let row = sqlx::query(
             r#"
             SELECT id, org_id, location_id, created_by, pass_number, visitor_name, visitor_phone_hmac, visitor_phone_enc,
@@ -82,15 +91,17 @@ impl PassRepository for PgPassRepository {
         )
         .bind(id)
         .bind(ctx.org_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?
         .ok_or(DomainError::PassNotFound(id))?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         Ok(map_row_to_pass(row)?)
     }
 
     async fn find_by_pass_number(&self, ctx: &OrgContext, number: &str) -> Result<VisitorPass, DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         let row = sqlx::query(
             r#"
             SELECT id, org_id, location_id, created_by, pass_number, visitor_name, visitor_phone_hmac, visitor_phone_enc,
@@ -102,15 +113,20 @@ impl PassRepository for PgPassRepository {
         )
         .bind(number)
         .bind(ctx.org_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?
         .ok_or(DomainError::PassNotFound(Uuid::nil()))?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         Ok(map_row_to_pass(row)?)
     }
 
     async fn find_by_pass_number_public(&self, number: &str) -> Result<VisitorPass, DomainError> {
+        // RLS bypass (reason 2, see rls.rs): the public share page
+        // (`/v/:pass_number`, no auth) looks a pass up by its number --
+        // there is no org context on an anonymous request.
+        let mut tx = super::rls::bypass_scoped_tx(&self.pool).await?;
         let row = sqlx::query(
             r#"
             SELECT id, org_id, location_id, created_by, pass_number, visitor_name, visitor_phone_hmac, visitor_phone_enc,
@@ -121,15 +137,17 @@ impl PassRepository for PgPassRepository {
             "#,
         )
         .bind(number)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?
         .ok_or(DomainError::PassNotFound(Uuid::nil()))?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         Ok(map_row_to_pass(row)?)
     }
 
     async fn list(&self, ctx: &OrgContext, filter: PassFilter, page: PageParams) -> Result<Page<VisitorPass>, DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         let mut query = String::from(
             r#"
             SELECT id, org_id, location_id, created_by, pass_number, visitor_name, visitor_phone_hmac, visitor_phone_enc,
@@ -205,10 +223,11 @@ impl PassRepository for PgPassRepository {
         }
         q = q.bind(page.limit + 1);
 
-        let rows = q.fetch_all(&self.pool).await.map_err(|e| {
+        let rows = q.fetch_all(&mut *tx).await.map_err(|e| {
             tracing::error!(error = %e, "List passes DB error");
             DomainError::CryptoError
         })?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         let mut items = Vec::new();
         for row in rows {
@@ -236,6 +255,7 @@ impl PassRepository for PgPassRepository {
         revoked_by: Uuid,
         reason: Option<String>,
     ) -> Result<VisitorPass, DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         // Increment the org sequence and mark revoked.
         sqlx::query(
             r#"
@@ -248,14 +268,16 @@ impl PassRepository for PgPassRepository {
         .bind(ctx.org_id)
         .bind(revoked_by)
         .bind(reason)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         self.find_by_id(ctx, pass_id).await
     }
 
     async fn increment_use_count(&self, ctx: &OrgContext, pass_id: Uuid) -> Result<(), DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, ctx.org_id).await?;
         // Select use_count and max_uses
         let row = sqlx::query(
             r#"
@@ -266,7 +288,7 @@ impl PassRepository for PgPassRepository {
         )
         .bind(pass_id)
         .bind(ctx.org_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?
         .ok_or(DomainError::PassNotFound(pass_id))?;
@@ -292,9 +314,10 @@ impl PassRepository for PgPassRepository {
         .bind(ctx.org_id)
         .bind(next_count)
         .bind(new_status)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         Ok(())
     }
@@ -305,6 +328,7 @@ impl PassRepository for PgPassRepository {
         location_id: Uuid,
         since_sync_seq: i64,
     ) -> Result<Vec<VisitorPass>, DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, org_id).await?;
         let rows = sqlx::query(
             r#"
             SELECT id, org_id, location_id, created_by, pass_number, visitor_name, visitor_phone_hmac, visitor_phone_enc,
@@ -318,9 +342,10 @@ impl PassRepository for PgPassRepository {
         .bind(org_id)
         .bind(location_id)
         .bind(since_sync_seq)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         let mut items = Vec::new();
         for row in rows {
@@ -334,6 +359,7 @@ impl PassRepository for PgPassRepository {
         org_id: Uuid,
         since_sync_seq: i64,
     ) -> Result<Vec<(Uuid, DateTime<Utc>)>, DomainError> {
+        let mut tx = super::rls::org_scoped_tx(&self.pool, org_id).await?;
         let rows = sqlx::query(
             r#"
             SELECT id, revoked_at
@@ -344,9 +370,10 @@ impl PassRepository for PgPassRepository {
         )
         .bind(org_id)
         .bind(since_sync_seq)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|_| DomainError::CryptoError)?;
+        tx.commit().await.map_err(|_| DomainError::CryptoError)?;
 
         let mut items = Vec::new();
         for row in rows {
