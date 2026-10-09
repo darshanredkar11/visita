@@ -49,6 +49,7 @@ Scope:
 - Trace the complete happy path: register organization → create location → register guard device → create pass → scan offline → record entry/exit → sync events.
 - Audit tenant isolation, authorization, secret handling, key lifecycle, idempotency, replay handling, device revocation and error handling.
 - Identify mismatches between README/specification and actual implementation.
+- Audit the existing approval-request and notification paths specifically; distinguish registered routes from fully implemented, tested end-to-end behavior.
 - Create a short, prioritized issue list with reproducible evidence.
 
 **Exit criteria:**
@@ -57,9 +58,9 @@ Scope:
 - Every later phase has testable acceptance criteria.
 - No claim is made that a capability works until its implementation and tests are verified.
 
-### Phase 1 — Reliable visitor lifecycle and offline gate
+### Phase 1 — Visitor lifecycle, approvals, notifications and offline gate
 
-**Goal:** make the single core workflow reliable.
+**Goal:** deliver the essential visitor journey from pass creation or an unexpected arrival through approval, entry/exit and reliable recording.
 
 Scope:
 - Create, view, list and revoke visitor passes.
@@ -72,14 +73,36 @@ Scope:
 - Handle duplicate/replayed scans explicitly; document what can and cannot be guaranteed offline.
 - Show understandable results to guards: valid, expired, revoked-known-to-device, invalid signature, already used or needs online confirmation.
 
-**Important offline limitation:** a disconnected device cannot learn about a revocation or policy change that occurred after its last successful sync. The product must make the last-sync/revocation freshness visible and define a configurable, explicit policy for stale devices rather than implying that offline revocation is instantaneous.
+#### Visitor approval workflow — required core feature
+
+- Allow a guard to create an approval request for an unexpected visitor, with only the minimum details needed to make a decision.
+- Route the request to the appropriate authorized host/resident or organization contact based on the premises' simple ownership/membership model.
+- Support explicit **Approve** and **Deny** decisions, a pending state, expiry/timeout, and a clear outcome at the gate.
+- Notify the guard of the decision when connected; prevent duplicate or conflicting decisions and record who decided and when.
+- Enforce server-side authorization: only the intended recipient or an authorized administrator may decide. A client-side button or push notification is never proof of authorization.
+- Keep an auditable record of the request, decision, timeout and resulting entry/denial event.
+- If the gate device is offline, clearly show that live approval is unavailable. Do not silently grant entry or imply that a request reached the host. Queue a request only if the product can safely deliver it later, and show its delivery status.
+
+#### Push notifications — required core feature
+
+- Support push notifications for a new visitor approval request, approval/denial outcome, and visitor arrival where that notification is enabled.
+- Deliver to the appropriate registered user/device; handle token registration, token refresh/removal, user sign-out and multiple devices.
+- Make notification delivery retry-safe and observable, and handle provider failures without losing the underlying approval request.
+- Keep lock-screen notification text privacy-minimal by default. Avoid exposing unnecessary visitor personal data; open the authenticated app for details.
+- Allow users to manage relevant notification preferences without disabling essential security or approval state recording.
+- Treat push as a best-effort alert, not the source of truth: the app must fetch the authoritative approval status from the server, and approval decisions must remain available in the audit trail.
+- Do not require push delivery for offline QR signature verification or local event capture.
+
+**Important offline limitation:** a disconnected device cannot learn about a revocation or policy change that occurred after its last successful sync. It also cannot obtain a live remote approval without a working communication path. Visita must make connectivity and last-sync/approval status visible and define explicit behavior for stale or offline devices rather than implying that offline revocation or live approvals are instantaneous.
 
 **Exit criteria:**
-- The end-to-end visitor lifecycle passes automated tests.
+- The end-to-end pre-approved visitor lifecycle passes automated tests.
 - Verification works without a network connection using previously synchronized trust material.
 - Offline events survive app restart and sync safely after reconnecting.
-- Expiry, invalid signatures, duplicate events and stale-device cases are tested.
-- No cross-organization pass, event or key access is possible.
+- An unexpected visitor can trigger a request, the correct authorized person can approve/deny it, and the gate receives the result when connected.
+- Push notifications are tested for success, token expiry, provider failure, retries and duplicate delivery.
+- Approval authorization, expiry, duplicate decisions, invalid signatures, stale-device cases and duplicate events are tested.
+- No cross-organization pass, approval, event or key access is possible.
 
 ### Phase 2 — Self-service organization onboarding and premises verification
 
@@ -115,11 +138,11 @@ Scope:
 - Show a clear, versioned privacy notice at the appropriate point in the flow; record the relevant notice version and acknowledgement where appropriate.
 - Separate necessary service processing from consent-based optional processing. Do not treat a blanket checkbox as a substitute for a valid legal basis or required notice.
 - Minimize visitor fields; keep phone number and identity-document collection optional unless a documented use case and applicable requirement justify them.
-- Apply role- and tenant-scoped access to visitor data, organization proof and entry logs.
+- Apply role- and tenant-scoped access to visitor data, organization proof, approval requests and entry logs.
 - Set conservative defaults for visitor-pass and entry-log retention, make permitted configuration explicit, and enforce automatic deletion.
-- Define separate retention rules for visitor records, security/audit events, account data and organization verification documents.
+- Define separate retention rules for visitor records, approval records, notification delivery metadata, security/audit events, account data and organization verification documents.
 - Provide an operational process for applicable data-subject requests, grievance handling, correction and deletion.
-- Maintain security-event audit trails without unnecessarily copying sensitive visitor data into logs.
+- Maintain security-event audit trails without unnecessarily copying sensitive visitor data into logs or push notification payloads.
 - Encrypt sensitive data at rest and in transit, protect encryption/signing keys, and restrict access to backups.
 - Protect offline databases, minimize the amount of personal data retained on guard devices, and document lost-device handling.
 - Prepare a practical incident and personal-data-breach response process.
@@ -131,7 +154,7 @@ Scope:
 - Deletion jobs are tested and failures are observable.
 - A person can find the privacy notice and the relevant request/grievance route.
 - Tenant isolation and role restrictions are covered by tests.
-- Offline storage, backups, evidence files and logs are included in the privacy/security review.
+- Offline storage, backups, evidence files, notifications and logs are included in the privacy/security review.
 
 ### Phase 4 — Device trust, recovery and operational reliability
 
@@ -160,15 +183,17 @@ Scope:
 Scope:
 - Manage locations and gate devices.
 - Invite and remove administrators/guards with clear roles.
-- Search/filter visitor passes and entry/exit history within the user's authorized scope.
+- Search/filter visitor passes, approval history and entry/exit history within the user's authorized scope.
 - Provide a basic export for authorized users, with privacy and retention controls applied.
 - Show simple daily entry/exit counts and, only if reliable, current occupancy.
 - Provide useful empty states, validation messages and a short setup guide.
+- Provide a minimal view of pending approvals and notification/approval status, without building a complex workflow engine.
 
 **Exit criteria:**
 - Common tasks can be completed without developer assistance.
 - Exports do not bypass authorization or retention rules.
 - Basic counts reconcile with recorded events and clearly communicate offline-sync freshness.
+- Hosts and guards can see whether an approval is pending, decided, expired or not delivered.
 
 ### Phase 6 — Pilot, hardening and public launch
 
@@ -176,7 +201,7 @@ Scope:
 
 Scope:
 - Pilot with a small mix of premises types using the same core workflow.
-- Test poor connectivity, long offline periods, device loss, duplicate scans, revoked passes, key rotation, backups and restore.
+- Test poor connectivity, long offline periods, device loss, duplicate scans, revoked passes, approval timeouts, push-provider failures, key rotation, backups and restore.
 - Review accessibility, mobile usability, onboarding completion and guard speed.
 - Publish clear installation, configuration, privacy, security-contact, backup and upgrade documentation.
 - Establish a supported deployment path and a process for security reports.
@@ -185,7 +210,7 @@ Scope:
 **Exit criteria:**
 - Pilot users can onboard and operate the product with minimal assistance.
 - No known unresolved critical security or data-isolation defects remain.
-- Core flows, recovery procedures and privacy controls have repeatable tests.
+- Core flows, approvals, notifications, recovery procedures and privacy controls have repeatable tests.
 - Release notes and known limitations are documented.
 
 ## 4. Cross-phase non-negotiable acceptance criteria
@@ -193,13 +218,13 @@ Scope:
 Every phase must preserve these invariants:
 
 - **Tenant isolation:** users and devices can access only authorized organizations, sites and records.
-- **Authorization:** the server validates permissions; hiding a UI action is not security.
-- **Offline honesty:** the UI must communicate stale synchronization and the limits of offline revocation.
+- **Authorization:** the server validates permissions; hiding a UI action or possessing a push notification is not security.
+- **Offline honesty:** the UI must communicate stale synchronization, offline approval limits and the limits of offline revocation.
 - **Data minimization:** no field or data collection is added without a stated purpose.
 - **Retention enforcement:** policy must be implemented and tested, not merely displayed in settings.
 - **Cryptographic correctness:** verify signatures and trust/key versions; never trust QR contents merely because they decode.
-- **Idempotent sync:** retries must not silently duplicate events or corrupt state.
-- **Auditability:** security-sensitive changes, organization verification decisions and device/key actions are attributable.
+- **Idempotent sync and notifications:** retries must not silently duplicate events, decisions or side effects.
+- **Auditability:** security-sensitive changes, organization verification decisions, approval decisions, device/key actions and notification failures are attributable.
 - **Operational recovery:** backup and restore must include the secrets/keys required to recover safely.
 - **Regression safety:** each change includes appropriate tests and does not break an existing flow.
 
@@ -220,6 +245,7 @@ A task is done only when:
 - [ ] Review the repository's current state and identify the real working baseline.
 - [ ] Run existing checks and record failures without hiding pre-existing issues.
 - [ ] Trace one complete visitor lifecycle through API, web/mobile, database and offline sync.
+- [ ] Trace approval request → authorized decision → push notification → gate result, and identify which links are implemented and tested.
 - [ ] Write the top critical/high-risk gaps with file paths and reproduction steps.
 - [ ] Select the first small implementation task from Phase 1 or the highest-risk prerequisite.
 - [ ] Keep onboarding and privacy requirements visible while implementing the core workflow.
@@ -228,7 +254,7 @@ A task is done only when:
 ## 7. Change-control rule
 
 This document is the working product boundary. A proposed feature should be accepted only if it:
-- supports the core visitor lifecycle, organization onboarding, privacy/security, or reliable operation;
+- supports the core visitor lifecycle, approvals/notifications, organization onboarding, privacy/security, or reliable operation;
 - is required to meet a demonstrated user need or legal obligation; and
 - can be delivered without making the core product unnecessarily complex.
 
